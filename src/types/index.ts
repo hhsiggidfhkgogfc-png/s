@@ -82,6 +82,7 @@ export interface RoomBackground {
   nameAr: string;
   imageUrl: string;
   createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface VoiceRoom {
@@ -130,7 +131,9 @@ export interface GiftItem {
   soundEffect: SoundEffectType;
   vipMinLevel?: number;
   isLucky?: boolean;
+  isStarterDefault?: boolean;
   descriptionAr: string;
+  updatedAt?: string;
 }
 
 export interface LuckyGiftConfig {
@@ -182,6 +185,7 @@ export interface StoreItem {
   icon: string;
   vipLevelReq?: number;
   descriptionAr: string;
+  updatedAt?: string;
 }
 
 export interface UserInventoryItem {
@@ -269,6 +273,8 @@ export interface RoomChatMessage {
     targetUserName: string;
     totalCoins: number;
   };
+  liveEvent?: RoomLiveEvent;
+  isRtcSignal?: boolean;
   timestamp: string;
 }
 
@@ -293,3 +299,67 @@ export interface StaffMember {
   status: 'active' | 'suspended';
   lastActive: string;
 }
+
+export interface AgoraVoiceConfig {
+  provider?: 'self_hosted' | 'agora';
+  appId: string;
+  rtcToken?: string;
+  note?: string;
+  updatedAt?: string;
+}
+
+export interface RoomLiveEventGiftSnapshot {
+  id: string;
+  name: string;
+  nameAr: string;
+  category: GiftCategory;
+  coinPrice: number;
+  diamondReward: number;
+  icon: string;
+  imageUrl?: string;
+  videoUrl?: string;
+  soundUrl?: string;
+  effectDurationSec?: number;
+  accentColor: string;
+  animationType: GiftItem['animationType'];
+  soundEffect: SoundEffectType;
+  isLucky?: boolean;
+}
+
+export interface RoomLiveEvent {
+  id: string;
+  kind: 'gift_throw' | 'lucky_bag' | 'rocket_explosion' | 'seat_emoji' | 'chat_message';
+  roomId: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  senderVipLevel?: number;
+  senderLevel?: number;
+  createdAt: number;
+  // gift_throw fields
+  gift?: RoomLiveEventGiftSnapshot;
+  targetSeats?: number[];
+  targetNames?: string;
+  count?: number;
+  comboHits?: number;
+  isLucky?: boolean;
+  luckyMultiplier?: number;
+  luckyWinCoins?: number;
+  // lucky_bag fields
+  tierName?: string;
+  totalCoinsPool?: number;
+  rewardGifts?: { giftId: string; nameAr: string; icon: string; count: number }[];
+  // rocket_explosion fields
+  rocketLevel?: number;
+  rocketNameAr?: string;
+  rocketIcon?: string;
+  rewardCoins?: number;
+  // seat_emoji fields
+  seatIndex?: number;
+  emoji?: string;
+  // chat_message fields
+  text?: string;
+  isSystem?: boolean;
+  timestamp?: string;
+}
+

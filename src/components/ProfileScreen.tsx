@@ -20,6 +20,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { VOICE_COUNTRIES } from '../utils/voiceProfileOptions';
+import { ProfileInstallButton } from './PWAInstallManager';
 
 type ProfileSubModal =
   | 'none'
@@ -44,10 +45,12 @@ export const ProfileScreen: React.FC = () => {
     setActiveModal,
     setViewingProfileUser,
     setCurrentView,
+    isAdminAccount,
     updateUserProfile,
     rechargeCoins,
     bagGifts,
     firebaseUser,
+    adminSession,
     signOutCloud,
     returnToAuthScreen,
   } = useApp();
@@ -173,6 +176,7 @@ export const ProfileScreen: React.FC = () => {
         </span>
 
         <div className="flex items-center gap-1.5 sm:gap-2">
+          <ProfileInstallButton variant="header" />
           <button
             onClick={() => setCurrentView('agent_portal')}
             className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-teal-500/15 border border-teal-400/35 text-teal-300 text-[11px] sm:text-xs font-bold flex items-center gap-1 hover:bg-teal-500/25 transition-colors"
@@ -180,13 +184,15 @@ export const ProfileScreen: React.FC = () => {
             <CreditCard className="w-3.5 h-3.5" />
             <span>الوكيل</span>
           </button>
-          <button
-            onClick={() => setCurrentView('admin_dashboard')}
-            className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-indigo-500/15 border border-indigo-400/35 text-indigo-300 text-[11px] sm:text-xs font-bold flex items-center gap-1 hover:bg-indigo-500/25 transition-colors"
-          >
-            <ShieldAlert className="w-3.5 h-3.5" />
-            <span>الإدارة</span>
-          </button>
+          {isAdminAccount && (
+            <button
+              onClick={() => setCurrentView('admin_dashboard')}
+              className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-indigo-500/15 border border-indigo-400/35 text-indigo-300 text-[11px] sm:text-xs font-bold flex items-center gap-1 hover:bg-indigo-500/25 transition-colors"
+            >
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span>الإدارة</span>
+            </button>
+          )}
           <button
             onClick={() => {
               setEditName(currentUser.displayName);
@@ -204,17 +210,17 @@ export const ProfileScreen: React.FC = () => {
           </button>
           <button
             onClick={() => {
-              if (firebaseUser) {
+              if (firebaseUser || adminSession) {
                 void signOutCloud();
               } else {
                 returnToAuthScreen();
               }
             }}
             className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl bg-rose-500/15 border border-rose-400/35 text-rose-300 text-[11px] sm:text-xs font-bold flex items-center gap-1 hover:bg-rose-500/25 transition-colors"
-            title={firebaseUser ? 'تسجيل الخروج' : 'تسجيل الدخول'}
+            title={firebaseUser || adminSession ? 'تسجيل الخروج' : 'تسجيل الدخول'}
           >
-            {firebaseUser ? <LogOut className="w-3.5 h-3.5" /> : <LogIn className="w-3.5 h-3.5" />}
-            <span>{firebaseUser ? 'خروج' : 'دخول'}</span>
+            {firebaseUser || adminSession ? <LogOut className="w-3.5 h-3.5" /> : <LogIn className="w-3.5 h-3.5" />}
+            <span>{firebaseUser || adminSession ? 'خروج' : 'دخول'}</span>
           </button>
         </div>
       </header>
@@ -223,6 +229,7 @@ export const ProfileScreen: React.FC = () => {
       <div className="px-3 sm:px-6 pt-2.5 lg:pt-5 grid grid-cols-1 lg:grid-cols-12 gap-2.5 lg:gap-5 items-start">
         {/* Column 1: Compact Horizontal Hero Identity + Slim 2-Col Wallet */}
         <div className="lg:col-span-5 space-y-2.5 lg:space-y-4">
+          <ProfileInstallButton variant="card" />
           {/* Compact Hero Profile Card */}
           <div className="relative rounded-2xl lg:rounded-3xl overflow-visible bg-gradient-to-b from-[#13192c] to-[#0c101d] border border-amber-400/25 p-3 lg:p-5 shadow-xl">
             <div className="flex items-center gap-3.5 text-right">
@@ -605,7 +612,7 @@ export const ProfileScreen: React.FC = () => {
                 {subModal === 'invite' && '🎁 دعوة الأصدقاء ومكافآت الكوينز'}
                 {subModal === 'records' && '📋 سجلات الحساب والربح'}
                 {subModal === 'settings' && '⚙️ إعدادات الحساب والتطبيق'}
-                {subModal === 'about' && 'ℹ️ حول ooyuni chat والدعم الفني'}
+                {subModal === 'about' && 'ℹ️ حول فوكاشات والدعم الفني'}
               </h3>
               <button
                 onClick={() => setSubModal('none')}
@@ -1223,7 +1230,7 @@ export const ProfileScreen: React.FC = () => {
                 <button
                   onClick={() => {
                     setSubModal('none');
-                    if (firebaseUser) {
+                    if (firebaseUser || adminSession) {
                       void signOutCloud();
                     } else {
                       returnToAuthScreen();
@@ -1231,8 +1238,8 @@ export const ProfileScreen: React.FC = () => {
                   }}
                   className="w-full p-3 rounded-2xl bg-rose-500/15 border border-rose-400/35 flex items-center justify-center gap-2 text-xs font-black text-rose-200 hover:bg-rose-500/25 transition-colors"
                 >
-                  {firebaseUser ? <LogOut className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
-                  <span>{firebaseUser ? 'تسجيل الخروج والعودة لصفحة الدخول' : 'الانتقال لصفحة تسجيل الدخول'}</span>
+                  {firebaseUser || adminSession ? <LogOut className="w-4 h-4" /> : <LogIn className="w-4 h-4" />}
+                  <span>{firebaseUser || adminSession ? 'تسجيل الخروج والعودة لصفحة الدخول' : 'الانتقال لصفحة تسجيل الدخول'}</span>
                 </button>
               </div>
             )}
@@ -1240,13 +1247,16 @@ export const ProfileScreen: React.FC = () => {
             {/* 10. ABOUT */}
             {subModal === 'about' && (
               <div className="space-y-3 text-center">
-                <div className="w-16 h-16 mx-auto rounded-2xl bg-gradient-to-tr from-amber-400 to-orange-600 flex items-center justify-center text-3xl shadow-lg">
-                  🎙️
-                </div>
-                <h4 className="text-base font-black text-white">ooyuni chat • عيوني شات</h4>
+                <img
+                  src="/logo.png"
+                  alt="فوكاشات"
+                  referrerPolicy="no-referrer"
+                  className="w-20 h-20 mx-auto rounded-2xl object-cover ring-1 ring-amber-400/50 shadow-lg"
+                />
+                <h4 className="text-base font-black text-white">فوكاشات • Fokashat VIP</h4>
                 <p className="text-xs text-slate-400">الإصدار الملكي v4.8.0 VIP</p>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  منصة الدردشة الصوتية الاجتماعية الأولى للغرف الصوتية التفاعلية، هدايا الحظ، الصواريخ، الألعاب الحية، ونظام الوكالات وVIP.
+                  منصة الدردشة الصوتية الاجتماعية الأولى للغرف الصوتية التفاعلية، هدايا الحظ، الصواريخ، الألعاب الحية، المتجر الملكي، ونظام الوكالات وVIP.
                 </p>
                 <div className="pt-2 flex items-center justify-center gap-2">
                   <button

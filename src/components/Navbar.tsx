@@ -28,9 +28,11 @@ export const Navbar: React.FC = () => {
     switchUserIdentity,
     currentView,
     setCurrentView,
+    isAdminAccount,
     setActiveModal,
     setViewingProfileUser,
     firebaseUser,
+    adminSession,
     firebaseStatus,
     signOutCloud,
     returnToAuthScreen,
@@ -62,15 +64,18 @@ export const Navbar: React.FC = () => {
         <div className="flex items-center gap-2.5">
           <div 
             onClick={() => setCurrentView('user_app')}
-            className="flex items-center gap-2 cursor-pointer group"
+            className="flex items-center gap-2.5 cursor-pointer group"
           >
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 via-rose-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
-              <Radio className="w-4 h-4 text-white" />
-            </div>
+            <img
+              src="/logo.png"
+              alt="فوكاشات"
+              referrerPolicy="no-referrer"
+              className="w-9 h-9 rounded-xl object-cover ring-1 ring-amber-400/50 shadow-lg shadow-amber-500/20"
+            />
             <div>
               <div className="flex items-center gap-1.5">
-                <span className="font-bold text-base sm:text-lg tracking-tight bg-gradient-to-r from-amber-300 via-amber-100 to-amber-300 bg-clip-text text-transparent">
-                  {t.appName}
+                <span className="font-black text-base sm:text-lg tracking-tight bg-gradient-to-r from-amber-300 via-amber-100 to-amber-300 bg-clip-text text-transparent">
+                  فوكاشات
                 </span>
                 <span className="text-[10px] uppercase font-mono font-bold text-amber-300 hidden sm:inline">
                   VIP
@@ -105,17 +110,19 @@ export const Navbar: React.FC = () => {
               <span>{t.rechargeAgent}</span>
             </button>
 
-            <button
-              onClick={() => setCurrentView('admin_dashboard')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
-                currentView === 'admin_dashboard'
-                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-sm font-bold'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Shield className="w-3.5 h-3.5" />
-              <span>{t.adminDashboard}</span>
-            </button>
+            {isAdminAccount && (
+              <button
+                onClick={() => setCurrentView('admin_dashboard')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-all ${
+                  currentView === 'admin_dashboard'
+                    ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-sm font-bold'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>{t.adminDashboard}</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -145,17 +152,19 @@ export const Navbar: React.FC = () => {
             <span className="truncate">{t.rechargeAgent}</span>
           </button>
 
-          <button
-            onClick={() => setCurrentView('admin_dashboard')}
-            className={`flex-1 min-h-[38px] flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-xl transition-all ${
-              currentView === 'admin_dashboard'
-                ? 'bg-indigo-500 text-white'
-                : 'bg-white/5 text-slate-300 hover:bg-white/10'
-            }`}
-          >
-            <Shield className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">{t.adminDashboard}</span>
-          </button>
+          {isAdminAccount && (
+            <button
+              onClick={() => setCurrentView('admin_dashboard')}
+              className={`flex-1 min-h-[38px] flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-xl transition-all ${
+                currentView === 'admin_dashboard'
+                  ? 'bg-indigo-500 text-white'
+                  : 'bg-white/5 text-slate-300 hover:bg-white/10'
+              }`}
+            >
+              <Shield className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">{t.adminDashboard}</span>
+            </button>
+          )}
         </div>
 
         {/* Center: Currency Pills (Coins & Diamonds) */}
@@ -335,7 +344,7 @@ export const Navbar: React.FC = () => {
                   </button>
                   <button
                     onClick={() => {
-                      if (firebaseUser) {
+                      if (firebaseUser || adminSession) {
                         void signOutCloud();
                       } else {
                         returnToAuthScreen();
@@ -347,6 +356,8 @@ export const Navbar: React.FC = () => {
                     <span>
                       {firebaseUser
                         ? `تسجيل الخروج (${firebaseUser.email?.split('@')[0] || 'حسابك'})`
+                        : adminSession
+                        ? `تسجيل الخروج (${adminSession.email})`
                         : 'صفحة تسجيل الدخول / إنشاء حساب'}
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono">

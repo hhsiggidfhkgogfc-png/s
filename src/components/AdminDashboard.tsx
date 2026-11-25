@@ -32,6 +32,11 @@ import {
   ShieldCheck,
   UserPlus,
   Link2,
+  Mic,
+  Copy,
+  Check,
+  Mail,
+  Lock,
 } from 'lucide-react';
 import { GiftCategory, GiftItem, SoundEffectType, StoreItem } from '../types';
 import { SmartMediaView } from './SmartMediaView';
@@ -42,6 +47,19 @@ import {
 } from '../utils/mediaFormats';
 import { ApngInfo, inspectApngUrl } from '../utils/apngEngine';
 import { sound } from '../utils/audio';
+import {
+  agoraVoice,
+  fetchServerAgoraStatus,
+  fetchVoiceServerStatus,
+  formatAgoraChannelName,
+  isValidAgoraAppId,
+  parseAgoraTokenInfo,
+  ParsedAgoraTokenInfo,
+  saveServerAgoraCertificate,
+  ServerAgoraStatus,
+  VoiceServerStatusSnapshot,
+} from '../utils/agoraVoice';
+import { STARTER_DEFAULT_GIFT_ID } from '../data/appDefaults';
 
 function parseOptionalDurationSec(raw: string): number | undefined {
   const trimmed = raw.trim();
@@ -64,6 +82,8 @@ export const AdminDashboard: React.FC = () => {
     storeItems,
     luckyConfig,
     updateLuckyConfig,
+    agoraConfig,
+    updateAgoraConfig,
     triggerGlobalJackpotBanner,
     currentUser,
     adminAddBalance,
@@ -87,6 +107,10 @@ export const AdminDashboard: React.FC = () => {
     adminUpdateAgencyStatus,
     setCurrentView,
     firebaseUser,
+    adminSession,
+    adminEmail,
+    adminAuthStatus,
+    updateAdminEmailCredentials,
     firebaseStatus,
     isCloudSyncing,
     cloudMessage,
@@ -94,10 +118,11 @@ export const AdminDashboard: React.FC = () => {
     signOutCloud,
     testCloudConnection,
     syncAllDataToCloud,
+    purgeMockCatalogs,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
-    'kpi' | 'users' | 'rooms' | 'gifts' | 'store' | 'agents' | 'agencies' | 'staff' | 'ledger' | 'firebase'
+    'kpi' | 'users' | 'rooms' | 'gifts' | 'store' | 'agents' | 'agencies' | 'staff' | 'ledger' | 'agora' | 'firebase'
   >('kpi');
 
   // Full Store Management State (Frames, Entrances, Badges, Bubbles)
@@ -197,6 +222,105 @@ export const AdminDashboard: React.FC = () => {
   const [newBgName, setNewBgName] = useState('');
   const [newBgUrl, setNewBgUrl] = useState('');
   const [roomModTargetUserByRoom, setRoomModTargetUserByRoom] = useState<Record<string, string>>({});
+
+  // Self-Hosted Voice Server + Optional Agora Live Voice Settings & Hardware Diagnostics
+  const [voiceServerSnapshot, setVoiceServerSnapshot] = useState<VoiceServerStatusSnapshot | null>(null);
+  const [isRefreshingVoiceServer, setIsRefreshingVoiceServer] = useState(false);
+  const [serverAgoraStatus, setServerAgoraStatus] = useState<ServerAgoraStatus | null>(null);
+  const [agoraCertInput, setAgoraCertInput] = useState('');
+  const [isSavingCert, setIsSavingCert] = useState(false);
+  const [isPurgingMocks, setIsPurgingMocks] = useState(false);
+  const [agoraAppIdInput, setAgoraAppIdInput] = useState(agoraConfig.appId);
+  const [agoraTokenInput, setAgoraTokenInput] = useState(agoraConfig.rtcToken || '');
+  const [agoraTokenInspectorInput, setAgoraTokenInspectorInput] = useState('');
+  const [parsedAgoraToken, setParsedAgoraToken] = useState<ParsedAgoraTokenInfo | null>(null);
+  const [agoraTestStatus, setAgoraTestStatus] = useState<{
+    ok: boolean;
+    message: string;
+    requiresToken?: boolean;
+  } | null>(null);
+  const [copiedAgoraChannel, setCopiedAgoraChannel] = useState<string | null>(null);
+  const [isTestingAgora, setIsTestingAgora] = useState(false);
+  const [isMicProbing, setIsMicProbing] = useState(false);
+  const [micProbeLevel, setMicProbeLevel] = useState(0);
+  const [micProbeMsg, setMicProbeMsg] = useState<string | null>(null);
+
+  // Clean Admin Dashboard Email + Password Account Management
+  const [newAdminEmailInput, setNewAdminEmailInput] = useState(
+    adminSession?.email || adminAuthStatus?.emailHint || adminEmail || ''
+  );
+  const [newAdminDisplayNameInput, setNewAdminDisplayNameInput] = useState(
+    adminSession?.displayName || 'مدير التطبيق'
+  );
+  const [newAdminPasswordInput, setNewAdminPasswordInput] = useState('');
+  const [newAdminPasswordConfirm, setNewAdminPasswordConfirm] = useState('');
+  const [isUpdatingAdminCreds, setIsUpdatingAdminCreds] = useState(false);
+  const [adminCredsFeedback, setAdminCredsFeedback] = useState<{ ok: boolean; text: string } | null>(
+    null
+  );
+
+  useEffect(() => {
+    const activeEmail = adminSession?.email || adminAuthStatus?.emailHint || adminEmail;
+    if (activeEmail && !newAdminEmailInput) {
+      setNewAdminEmailInput(activeEmail);
+    }
+    if (adminSession?.displayName) {
+      setNewAdminDisplayNameInput(adminSession.displayName);
+    }
+  }, [adminSession?.email, adminSession?.displayName, adminAuthStatus?.emailHint, adminEmail]);
+
+  const refreshVoiceDiagnostics = async () => {
+    setIsRefreshingVoiceServer(true);
+    try {
+      const [vs, ag] = await Promise.all([
+        fetchVoiceServerStatus(),
+        fetchServerAgoraStatus(),
+      ]);
+      setVoiceServerSnapshot(vs);
+      setServerAgoraStatus(ag);
+    } finally {
+      setIsRefreshingVoiceServer(false);
+    }
+  };
+
+  useEffect(() => {
+    setAgoraAppIdInput(agoraConfig.appId);
+    setAgoraTokenInput(agoraConfig.rtcToken || '');
+  }, [agoraConfig.appId, agoraConfig.rtcToken]);
+
+  useEffect(() => {
+    if (activeTab === 'agora') {
+      void refreshVoiceDiagnostics();
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    const trimmed = agoraTokenInspectorInput.trim();
+    if (!trimmed) {
+      setParsedAgoraToken(null);
+      return;
+    }
+    let cancelled = false;
+    void parseAgoraTokenInfo(trimmed).then((info) => {
+      if (cancelled) return;
+      setParsedAgoraToken(info);
+      if (info.valid && info.appId) {
+        setAgoraAppIdInput(info.appId);
+      }
+      if (info.valid && info.isRtcToken) {
+        setAgoraTokenInput(trimmed);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agoraTokenInspectorInput]);
+
+  useEffect(() => {
+    return () => {
+      agoraVoice.stopMicProbe();
+    };
+  }, []);
 
   useEffect(() => {
     const probeUrl = (newGiftVideoUrl || newGiftImageUrl).trim();
@@ -416,6 +540,7 @@ export const AdminDashboard: React.FC = () => {
     { id: 'agencies', label: 'الوكالات', icon: <Briefcase className="w-4 h-4" /> },
     { id: 'staff', label: 'الصلاحيات', icon: <Shield className="w-4 h-4" /> },
     { id: 'ledger', label: 'السجل المالي', icon: <History className="w-4 h-4" /> },
+    { id: 'agora', label: 'السيرفر الصوتي الخاص', icon: <Mic className="w-4 h-4" /> },
     { id: 'firebase', label: 'قاعدة البيانات', icon: <Database className="w-4 h-4" /> },
   ];
 
@@ -547,8 +672,8 @@ export const AdminDashboard: React.FC = () => {
                     winnerName: currentUser.displayName,
                     winnerAvatar: currentUser.avatar,
                     roomTitle: rooms[0]?.title || 'بيت العائلة 👑',
-                    giftName: 'مصاصة الحظ السحرية',
-                    giftIcon: '🍭',
+                    giftName: gifts[0]?.nameAr || 'هدية الترحيب',
+                    giftIcon: gifts[0]?.icon || '🎁',
                     amountWon: 1250000,
                     comboTotalCoins: 1250000,
                     multiplier: 188,
@@ -809,7 +934,7 @@ export const AdminDashboard: React.FC = () => {
                   <label className="flex items-center justify-between text-slate-300 mb-1 font-semibold">
                     <span className="flex items-center gap-1.5">
                       <Video className="w-3.5 h-3.5 text-rose-400" />
-                      <span>رابط حركة الهدية (MP4 / WebM / APNG / GIF / WebP):</span>
+                      <span>رابط حركة الهدية (VAP / MP4 شفاف تلقائياً / WebM / APNG / GIF / WebP):</span>
                     </span>
                     {newGiftVideoUrl.trim() && (
                       <span className="font-mono text-[10px] text-rose-300">
@@ -823,7 +948,7 @@ export const AdminDashboard: React.FC = () => {
                     type="text"
                     value={newGiftVideoUrl}
                     onChange={(e) => setNewGiftVideoUrl(e.target.value)}
-                    placeholder="https://example.com/luxury-gift.mp4 أو .apng أو .gif"
+                    placeholder="https://example.com/gift-vap.mp4 أو .vap أو .apng أو .gif (يزيل الخلفية البيضاء تلقائياً)"
                     dir="ltr"
                     className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-rose-300 font-mono text-left focus:outline-none focus:border-rose-400"
                   />
@@ -1019,22 +1144,57 @@ export const AdminDashboard: React.FC = () => {
 
             {/* Active Gifts Catalog */}
             <div className="lg:col-span-7 bg-[#101524] border border-white/10 rounded-3xl p-4 sm:p-5 shadow-xl space-y-3">
-              <div className="flex items-center justify-between">
-                <h3 className="font-bold text-sm text-white">
-                  الهدايا المفعلة ({gifts.length})
-                </h3>
-                <span className="text-[11px] text-slate-400">اضغط تعديل لإضافة رابط MP4 أو صورة</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="font-bold text-sm text-white">
+                    هدايا السيرفر المفعلة ({gifts.filter((g) => !g.isStarterDefault && g.id !== STARTER_DEFAULT_GIFT_ID).length})
+                  </h3>
+                  <span className="text-[11px] text-slate-400">
+                    اضغط تعديل لإضافة رابط MP4 أو صورة ·{' '}
+                    <span className="text-emerald-300 font-semibold">
+                      تحديث فوري لجميع المستخدمين ({firebaseStatus.projectId})
+                    </span>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={isPurgingMocks}
+                  onClick={async () => {
+                    setIsPurgingMocks(true);
+                    try {
+                      const msg = await purgeMockCatalogs();
+                      showAdminNotice(msg);
+                    } catch (err: any) {
+                      showAdminNotice(err?.message || 'تعذر تنظيف العناصر الوهمية');
+                    } finally {
+                      setIsPurgingMocks(false);
+                    }
+                  }}
+                  className="min-h-[36px] px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-rose-200 text-[11px] font-bold transition-colors disabled:opacity-60"
+                >
+                  {isPurgingMocks ? 'جاري التنظيف...' : 'تنظيف السيرفر من الوهميات'}
+                </button>
               </div>
 
+              {gifts.some((g) => g.isStarterDefault || g.id === STARTER_DEFAULT_GIFT_ID) && (
+                <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-400/35 text-amber-200 text-xs leading-relaxed">
+                  تظهر <strong className="text-amber-300">هدية ترحيب افتراضية واحدة</strong> في الغرف مؤقتاً حتى ترفع أول هدية فعلية من هنا — وتختفي تلقائياً بمجرد الرفع.
+                </div>
+              )}
+
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 max-h-[540px] overflow-y-auto pr-0.5">
-                {gifts.map((g) => (
+                {gifts.map((g) => {
+                  const isStarter = Boolean(g.isStarterDefault || g.id === STARTER_DEFAULT_GIFT_ID);
+                  return (
                   <div
                     key={g.id}
-                    className="p-3 rounded-2xl bg-slate-950/90 border border-white/8 flex flex-col items-center justify-between text-center text-xs space-y-2"
+                    className={`p-3 rounded-2xl border flex flex-col items-center justify-between text-center text-xs space-y-2 ${
+                      isStarter ? 'bg-amber-500/8 border-amber-400/35' : 'bg-slate-950/90 border-white/8'
+                    }`}
                   >
                     <div className="w-full flex items-center justify-between text-[10px]">
                       <span className="font-mono text-pink-300">
-                        {g.isLucky || g.category === 'lucky' ? 'حظ 🍭' : ''}
+                        {isStarter ? 'افتراضية مؤقتة' : g.isLucky || g.category === 'lucky' ? 'حظ 🍭' : ''}
                       </span>
                       <span className="font-mono text-rose-300 flex items-center gap-1">
                         {g.soundUrl && <span className="text-emerald-300">🔊</span>}
@@ -1064,29 +1224,32 @@ export const AdminDashboard: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 w-full pt-1">
-                      <button
-                        type="button"
-                        onClick={() => openEditGiftModal(g)}
-                        className="flex-1 min-h-[34px] rounded-lg bg-white/8 hover:bg-white/14 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-1"
-                      >
-                        <Edit3 className="w-3 h-3" />
-                        <span>روابط/تعديل</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          adminDeleteGift(g.id);
-                          showAdminNotice(`تم حذف الهدية (${g.nameAr}).`);
-                        }}
-                        className="w-8 min-h-[34px] rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 flex items-center justify-center"
-                        title="حذف الهدية"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    {!isStarter && (
+                      <div className="flex items-center gap-1.5 w-full pt-1">
+                        <button
+                          type="button"
+                          onClick={() => openEditGiftModal(g)}
+                          className="flex-1 min-h-[34px] rounded-lg bg-white/8 hover:bg-white/14 text-slate-200 text-[11px] font-bold flex items-center justify-center gap-1"
+                        >
+                          <Edit3 className="w-3 h-3" />
+                          <span>روابط/تعديل</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            adminDeleteGift(g.id);
+                            showAdminNotice(`تم حذف الهدية (${g.nameAr}).`);
+                          }}
+                          className="w-8 min-h-[34px] rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 flex items-center justify-center"
+                          title="حذف الهدية"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -1227,7 +1390,7 @@ export const AdminDashboard: React.FC = () => {
                       <label className="block text-slate-300 mb-1 font-semibold flex items-center justify-between gap-1.5">
                         <span className="flex items-center gap-1.5">
                           <Video className="w-3.5 h-3.5 text-purple-400" />
-                          <span>رابط حركة الدخولية (MP4 / WebM / GIF / WebP — أي رابط):</span>
+                          <span>رابط حركة الدخولية (VAP / MP4 شفاف تلقائياً / WebM / APNG / GIF / WebP):</span>
                         </span>
                         {newStoreType === 'entrance' && (
                           <span className="font-mono text-[10px] text-purple-300">
@@ -1244,7 +1407,7 @@ export const AdminDashboard: React.FC = () => {
                         dir="ltr"
                         value={newStoreVideoUrl}
                         onChange={(e) => setNewStoreVideoUrl(e.target.value)}
-                        placeholder="https://example.com/entrance.mp4 أو .apng أو .gif"
+                        placeholder="https://example.com/entrance-vap.mp4 أو .vap أو .apng أو .gif"
                         className="w-full min-h-[40px] bg-slate-950 border border-white/12 rounded-xl px-3 text-purple-300 font-mono text-left focus:outline-none focus:border-purple-400"
                       />
                     </div>
@@ -1338,6 +1501,25 @@ export const AdminDashboard: React.FC = () => {
                 <h2 className="font-bold text-sm text-white">
                   كتالوج المتجر الشامل ({storeItems.length} عنصر)
                 </h2>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isPurgingMocks}
+                    onClick={async () => {
+                      setIsPurgingMocks(true);
+                      try {
+                        const msg = await purgeMockCatalogs();
+                        showAdminNotice(msg);
+                      } catch (err: any) {
+                        showAdminNotice(err?.message || 'تعذر تنظيف العناصر الوهمية');
+                      } finally {
+                        setIsPurgingMocks(false);
+                      }
+                    }}
+                    className="min-h-[34px] px-3 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-400/35 text-rose-200 text-[11px] font-bold transition-colors disabled:opacity-60"
+                  >
+                    {isPurgingMocks ? 'جاري التنظيف...' : 'تنظيف السيرفر من الوهميات'}
+                  </button>
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar text-[11px]">
                   {[
                     { id: 'all', label: `الكل (${storeItems.length})` },
@@ -1360,8 +1542,15 @@ export const AdminDashboard: React.FC = () => {
                     </button>
                   ))}
                 </div>
+                </div>
               </div>
 
+              {storeItems.filter((item) => storeFilter === 'all' || item.type === storeFilter).length === 0 ? (
+                <div className="p-10 rounded-2xl bg-slate-950/60 border border-white/8 text-center text-xs text-slate-400 space-y-2">
+                  <div className="text-3xl">🛍️</div>
+                  <div>لا توجد عناصر متجر مرفوعة حالياً — استخدم النموذج الجانبي لإضافة إطارات أو دخوليات أو أوسمة من السيرفر.</div>
+                </div>
+              ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 max-h-[700px] overflow-y-auto pr-1">
                 {storeItems
                   .filter((item) => storeFilter === 'all' || item.type === storeFilter)
@@ -1597,7 +1786,7 @@ export const AdminDashboard: React.FC = () => {
                                 durationDays: Math.max(1, draft.durationDays),
                               };
                               adminUpdateStoreItem(item.id, updatedPayload);
-                              equipInventoryItem(item.type, item.id);
+                              equipInventoryItem(item.type, item.id, true);
                               showAdminNotice(`تم حفظ وتفعيل (${draft.nameAr}) على حسابك الآن!`);
                             }}
                             className="w-full min-h-[38px] rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] transition-colors"
@@ -1609,6 +1798,7 @@ export const AdminDashboard: React.FC = () => {
                     );
                   })}
               </div>
+              )}
             </div>
           </div>
 
@@ -2360,7 +2550,11 @@ export const AdminDashboard: React.FC = () => {
                           : 'bg-amber-500/15 text-amber-300 border-amber-400/40'
                       }`}
                     >
-                      {firebaseStatus.isConnected ? '● متصل بنجاح' : '● جاري التحقق'}
+                      {firebaseStatus.isConnected
+                        ? '● متصل بنجاح'
+                        : firebaseStatus.isTesting
+                        ? '● جاري التحقق...'
+                        : '● جاري الربط'}
                     </span>
                   </div>
                   <p className="text-xs text-slate-400 mt-1 font-mono" dir="ltr">
@@ -2393,9 +2587,9 @@ export const AdminDashboard: React.FC = () => {
               </div>
             </div>
 
-            {cloudMessage && (
+            {(cloudMessage || firebaseStatus.message) && (
               <div className="p-3 rounded-2xl bg-slate-950/80 border border-white/10 text-xs text-emerald-300 font-semibold">
-                {cloudMessage}
+                {cloudMessage || firebaseStatus.message}
               </div>
             )}
 
@@ -2454,8 +2648,678 @@ export const AdminDashboard: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {/* Clean Single Admin Email + Password Account Card */}
+          <div className="p-5 rounded-3xl bg-gradient-to-br from-[#13192b] via-[#101524] to-[#0b101d] border border-amber-400/25 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-3.5">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-amber-400/15 border border-amber-400/40 flex items-center justify-center text-amber-300 shrink-0">
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-white">
+                    حساب لوحة التحكم (البريد الإلكتروني وكلمة السر)
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    البريد النشط حالياً:{' '}
+                    <span className="font-mono text-amber-300" dir="ltr">
+                      {adminSession?.email || adminAuthStatus?.emailHint || adminEmail}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              <span className="px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/35 text-emerald-300 text-[11px] font-bold self-start sm:self-auto">
+                حساب إدارة واحد نظيف
+              </span>
+            </div>
+
+            {adminSession && !firebaseUser && (
+              <div className="p-3 rounded-2xl bg-indigo-500/12 border border-indigo-400/30 text-xs text-indigo-200 leading-relaxed">
+                أنت مسجّل الآن بحساب البريد الإلكتروني وكلمة السر وتُحدَّث الهدايا والمتجر فوراً لجميع متصلي السيرفر. يمكنك أيضاً الضغط على «ربط بحساب Google» أعلاه للمزامنة السحابية بين أكثر من رابط استضافة.
+              </div>
+            )}
+
+            {adminCredsFeedback && (
+              <div
+                className={`p-3 rounded-2xl border text-xs font-bold ${
+                  adminCredsFeedback.ok
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-400/40 text-rose-200'
+                }`}
+              >
+                {adminCredsFeedback.text}
+              </div>
+            )}
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setAdminCredsFeedback(null);
+                const cleanEmail = newAdminEmailInput.trim();
+                if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+                  setAdminCredsFeedback({
+                    ok: false,
+                    text: 'يرجى إدخال بريد إلكتروني صحيح.',
+                  });
+                  return;
+                }
+                if (newAdminPasswordInput.length < 6) {
+                  setAdminCredsFeedback({
+                    ok: false,
+                    text: 'كلمة السر يجب أن تكون 6 أحرف على الأقل.',
+                  });
+                  return;
+                }
+                if (newAdminPasswordInput !== newAdminPasswordConfirm) {
+                  setAdminCredsFeedback({
+                    ok: false,
+                    text: 'كلمتا المرور غير متطابقتين.',
+                  });
+                  return;
+                }
+                setIsUpdatingAdminCreds(true);
+                try {
+                  const res = await updateAdminEmailCredentials({
+                    email: cleanEmail,
+                    password: newAdminPasswordInput,
+                    displayName: newAdminDisplayNameInput.trim() || 'مدير التطبيق',
+                  });
+                  setAdminCredsFeedback({ ok: res.ok, text: res.message });
+                  if (res.ok) {
+                    setNewAdminPasswordInput('');
+                    setNewAdminPasswordConfirm('');
+                    showAdminNotice(res.message);
+                  }
+                } finally {
+                  setIsUpdatingAdminCreds(false);
+                }
+              }}
+              className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs"
+            >
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">اسم المدير:</label>
+                <input
+                  type="text"
+                  value={newAdminDisplayNameInput}
+                  onChange={(e) => setNewAdminDisplayNameInput(e.target.value)}
+                  placeholder="مدير التطبيق"
+                  required
+                  className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="flex items-center gap-1.5 text-slate-300 font-semibold mb-1">
+                  <Mail className="w-3.5 h-3.5 text-amber-400" />
+                  <span>البريد الإلكتروني الجديد للمدير:</span>
+                </label>
+                <input
+                  type="email"
+                  dir="ltr"
+                  required
+                  value={newAdminEmailInput}
+                  onChange={(e) => setNewAdminEmailInput(e.target.value)}
+                  placeholder="admin@yourdomain.com"
+                  className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-amber-300 font-mono text-left focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="flex items-center gap-1.5 text-slate-300 font-semibold mb-1">
+                  <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>كلمة السر الجديدة (6 أحرف على الأقل):</span>
+                </label>
+                <input
+                  type="password"
+                  dir="ltr"
+                  required
+                  minLength={6}
+                  value={newAdminPasswordInput}
+                  onChange={(e) => setNewAdminPasswordInput(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-emerald-300 font-mono text-left focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <div>
+                <label className="flex items-center gap-1.5 text-slate-300 font-semibold mb-1">
+                  <Lock className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>تأكيد كلمة السر الجديدة:</span>
+                </label>
+                <input
+                  type="password"
+                  dir="ltr"
+                  required
+                  minLength={6}
+                  value={newAdminPasswordConfirm}
+                  onChange={(e) => setNewAdminPasswordConfirm(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-emerald-300 font-mono text-left focus:outline-none focus:border-emerald-400"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <button
+                  type="submit"
+                  disabled={isUpdatingAdminCreds}
+                  className="w-full sm:w-auto min-h-[42px] px-5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 disabled:opacity-60 text-slate-950 font-black text-xs transition-colors"
+                >
+                  {isUpdatingAdminCreds ? 'جاري التحديث...' : 'حفظ البريد وكلمة السر لحساب المدير'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
+
+      {/* TAB 10: SELF-HOSTED VOICE SERVER & OPTIONAL AGORA CLOUD */}
+      {activeTab === 'agora' && (() => {
+        const activeProvider = agoraConfig.provider || 'self_hosted';
+        const isSelfHostedActive = activeProvider !== 'agora';
+
+        return (
+        <div className="space-y-4">
+          <div className="p-5 rounded-3xl bg-gradient-to-br from-[#10192b] via-[#0e1524] to-[#0b101d] border border-cyan-500/30 shadow-xl space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center text-cyan-300 shrink-0">
+                  <Mic className="w-6 h-6" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-base font-black text-white">
+                      {isSelfHostedActive
+                        ? 'السيرفر الصوتي الخاص (WebRTC + WebSocket)'
+                        : 'حساب Agora السحابي (اختياري)'}
+                    </h3>
+                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold border bg-emerald-500/15 text-emerald-300 border-emerald-400/40">
+                      {isSelfHostedActive
+                        ? voiceServerSnapshot?.status === 'online' || firebaseStatus.isConnected
+                          ? '● متصل ويعمل مباشرة'
+                          : '● مفعّل · السيرفر الخاص'
+                        : '● وضع Agora مفعّل'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1 font-mono" dir="ltr">
+                    {isSelfHostedActive
+                      ? voiceServerSnapshot?.mode === 'serverless_cloud' ||
+                        voiceServerSnapshot?.engine === 'firestore_rtc' ||
+                        (!voiceServerSnapshot && firebaseStatus.isConnected)
+                        ? `Cloud Signaling: Firestore WebRTC (${firebaseStatus.projectId}) · Media: WebRTC Full-Duplex`
+                        : `Self-Hosted Signaling: /ws/voice · Media: WebRTC Full-Duplex`
+                      : `Active App ID: ${agoraConfig.appId}`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isRefreshingVoiceServer}
+                  onClick={() => void refreshVoiceDiagnostics()}
+                  className="min-h-[42px] px-3.5 py-2 rounded-xl bg-white/8 hover:bg-white/14 border border-white/10 text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isRefreshingVoiceServer ? 'animate-spin' : ''}`} />
+                  <span>تحديث الحالة</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isTestingAgora}
+                  onClick={async () => {
+                    setIsTestingAgora(true);
+                    setAgoraTestStatus(null);
+                    const testRoomId = rooms[0]?.id || 'room_tyy';
+                    const res = await agoraVoice.testConnection(testRoomId);
+                    setAgoraTestStatus({
+                      ok: res.ok,
+                      message: res.message,
+                      requiresToken: res.requiresToken,
+                    });
+                    await refreshVoiceDiagnostics();
+                    setIsTestingAgora(false);
+                  }}
+                  className="min-h-[42px] px-4 py-2 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  <Wifi className="w-4 h-4" />
+                  <span>
+                    {isTestingAgora
+                      ? 'جاري الاختبار...'
+                      : isSelfHostedActive
+                      ? 'اختبار اتصال السيرفر الصوتي'
+                      : 'اختبار اتصال Agora المباشر'}
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            {/* Engine Provider Switcher */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  updateAgoraConfig({ provider: 'self_hosted' });
+                  setAgoraTestStatus(null);
+                  showAdminNotice('تم تفعيل السيرفر الصوتي الخاص (WebRTC + WebSocket) بدون الحاجة لأي توكن خارجي.');
+                }}
+                className={`p-3.5 rounded-2xl border text-right transition-all cursor-pointer ${
+                  isSelfHostedActive
+                    ? 'bg-emerald-500/15 border-emerald-400/60 text-white'
+                    : 'bg-slate-950/70 border-white/10 text-slate-300 hover:bg-white/[0.05]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs font-black">
+                  <span>السيرفر الصوتي الخاص (مفعّل تلقائياً)</span>
+                  <span className="text-emerald-300">{isSelfHostedActive ? '✓ نشط' : 'تفعيل'}</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  بث صوتي مباشر بين المايكات عبر WebSocket (/ws/voice) و WebRTC دون قيود شهادات خارجية.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  updateAgoraConfig({ provider: 'agora' });
+                  setAgoraTestStatus(null);
+                  showAdminNotice('تم التحويل إلى محرك Agora Cloud.');
+                }}
+                className={`p-3.5 rounded-2xl border text-right transition-all cursor-pointer ${
+                  !isSelfHostedActive
+                    ? 'bg-amber-500/15 border-amber-400/60 text-white'
+                    : 'bg-slate-950/70 border-white/10 text-slate-300 hover:bg-white/[0.05]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs font-black">
+                  <span>Agora Cloud (اختياري)</span>
+                  <span className="text-amber-300">{!isSelfHostedActive ? '✓ نشط' : 'تبديل'}</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  استخدم Agora RTC مع App ID وشهادة App Certificate أو Temp Token.
+                </p>
+              </button>
+            </div>
+
+            {agoraTestStatus && (
+              <div
+                className={`p-3.5 rounded-2xl border text-xs font-bold space-y-2 ${
+                  agoraTestStatus.ok
+                    ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200'
+                    : 'bg-rose-500/15 border-rose-400/40 text-rose-200'
+                }`}
+              >
+                <div>{agoraTestStatus.message}</div>
+                {agoraTestStatus.requiresToken && (
+                  <div className="p-2.5 rounded-xl bg-black/30 border border-amber-400/30 text-amber-200 font-normal leading-relaxed space-y-1">
+                    <div className="font-black text-amber-300">يمكنك التبديل للسيرفر الصوتي الخاص أعلاه فوراً أو تفعيل شهادة Agora من الأسفل.</div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {/* Left: Self-Hosted Voice Server Live Telemetry OR Agora Config */}
+              {isSelfHostedActive ? (
+                <div className="p-4 rounded-2xl bg-slate-950/80 border border-white/10 space-y-4 text-xs">
+                  <div className="flex items-center justify-between">
+                    <div className="font-black text-sm text-emerald-300">
+                      مراقبة السيرفر الصوتي الخاص المباشر
+                    </div>
+                    <span className="font-mono text-[11px] text-slate-400" dir="ltr">
+                      {voiceServerSnapshot?.wsPath || '/ws/voice'}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3 rounded-2xl bg-slate-900/90 border border-white/8">
+                      <div className="text-slate-400 text-[11px]">حالة السيرفر</div>
+                      <div className="text-emerald-300 font-black text-base mt-1">
+                        {isRefreshingVoiceServer
+                          ? 'جاري الفحص...'
+                          : voiceServerSnapshot?.status === 'online'
+                          ? voiceServerSnapshot.mode === 'serverless_cloud' ||
+                            voiceServerSnapshot.engine === 'firestore_rtc'
+                            ? 'متصل سحابياً (Cloud)'
+                            : 'متصل Online'
+                          : firebaseStatus.isConnected
+                          ? 'متصل سحابياً (Firestore)'
+                          : 'جاري التحقق'}
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-slate-900/90 border border-white/8">
+                      <div className="text-slate-400 text-[11px]">الغرف الصوتية النشطة</div>
+                      <div className="text-amber-300 font-mono tabular-nums font-black text-base mt-1">
+                        {voiceServerSnapshot?.activeRoomsCount ?? 0}
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-slate-900/90 border border-white/8">
+                      <div className="text-slate-400 text-[11px]">المستخدمون المتصلون</div>
+                      <div className="text-cyan-300 font-mono tabular-nums font-black text-base mt-1">
+                        {voiceServerSnapshot?.activePeersCount ?? 0}
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-slate-900/90 border border-white/8">
+                      <div className="text-slate-400 text-[11px]">المتحدثون على المايك</div>
+                      <div className="text-pink-300 font-mono tabular-nums font-black text-base mt-1">
+                        {voiceServerSnapshot?.activeSpeakersCount ?? 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-2xl bg-slate-900/80 border border-white/8 space-y-1.5 text-[11px] text-slate-300 leading-relaxed">
+                    <div className="font-bold text-white">كيف يعمل السيرفر الصوتي الخاص بك؟</div>
+                    <div>• يعمل خادم الإشارات WebSocket مباشرة على منفذ التطبيق (<span className="font-mono text-cyan-300">/ws/voice</span>).</div>
+                    <div>• بمجرد جلوس المستخدم على أي مايك داخل الغرفة يتم التقاط الصوت وإرساله عبر WebRTC Full-Duplex لجميع المستمعين والمتحدثين الآخرين.</div>
+                    <div>• يدعم الكتم الفوري، إلغاء الصدى والضوضاء التلقائي، وإعادة الربط التلقائي عند ضعف الشبكة.</div>
+                  </div>
+                </div>
+              ) : (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!isValidAgoraAppId(agoraAppIdInput)) {
+                    showAdminNotice('يرجى إدخال Agora App ID صحيح مكون من 32 حرف/رقم.');
+                    return;
+                  }
+                  let tokenToSave = agoraTokenInput.trim() || undefined;
+                  let extractedAppId = agoraAppIdInput.trim();
+                  if (tokenToSave && tokenToSave.startsWith('007')) {
+                    const info = await parseAgoraTokenInfo(tokenToSave);
+                    if (info.valid && info.appId) {
+                      extractedAppId = info.appId;
+                      setAgoraAppIdInput(info.appId);
+                    }
+                    if (info.valid && !info.isRtcToken) {
+                      tokenToSave = undefined;
+                      setAgoraTokenInput('');
+                      updateAgoraConfig({ provider: 'agora', appId: extractedAppId, rtcToken: undefined });
+                      showAdminNotice(
+                        `تم تفعيل App ID (${extractedAppId}). التوكن المُدخل (${info.serviceLabel}) مخصص للشات وليس RTC Voice Token.`
+                      );
+                      return;
+                    }
+                  }
+                  updateAgoraConfig({
+                    provider: 'agora',
+                    appId: extractedAppId,
+                    rtcToken: tokenToSave,
+                  });
+                  showAdminNotice('تم حفظ وتفعيل إعدادات Agora للصوت المباشر.');
+                }}
+                className="p-4 rounded-2xl bg-slate-950/80 border border-white/10 space-y-3.5 text-xs"
+              >
+                <div className="font-black text-sm text-amber-300">
+                  إعدادات مشروع Agora (App ID / Certificate / Token)
+                </div>
+
+                {/* Server-side App Certificate Setter */}
+                <div className="p-3 rounded-xl bg-slate-900/80 border border-cyan-400/25 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-cyan-200">توليد التوكن تلقائياً بالسيرفر (App Certificate)</span>
+                    <span className="font-mono text-[10px] text-emerald-300">
+                      {serverAgoraStatus?.hasCertificate ? `مفعّل (${serverAgoraStatus.certificateSource})` : 'غير مضبوط'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      dir="ltr"
+                      value={agoraCertInput}
+                      onChange={(e) => setAgoraCertInput(e.target.value)}
+                      placeholder="32-char Primary App Certificate"
+                      className="flex-1 min-h-[38px] bg-slate-950 border border-white/12 rounded-xl px-3 text-cyan-200 font-mono text-left focus:outline-none focus:border-cyan-400"
+                    />
+                    <button
+                      type="button"
+                      disabled={isSavingCert || !agoraCertInput.trim()}
+                      onClick={async () => {
+                        if (!firebaseUser && !adminSession) {
+                          showAdminNotice('يرجى تسجيل الدخول بحساب المسؤول أولاً لحفظ شهادة الخادم.');
+                          return;
+                        }
+                        setIsSavingCert(true);
+                        try {
+                          const authToken = firebaseUser
+                            ? await firebaseUser.getIdToken()
+                            : adminSession!.token;
+                          const res = await saveServerAgoraCertificate(
+                            authToken,
+                            agoraCertInput,
+                            agoraAppIdInput
+                          );
+                          if (res.ok) {
+                            showAdminNotice('تم حفظ وتفعيل شهادة Agora على الخادم بنجاح.');
+                            setAgoraCertInput('');
+                            await refreshVoiceDiagnostics();
+                          } else {
+                            showAdminNotice(res.error || 'تعذر حفظ شهادة Agora على الخادم.');
+                          }
+                        } finally {
+                          setIsSavingCert(false);
+                        }
+                      }}
+                      className="min-h-[38px] px-3 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-black disabled:opacity-50"
+                    >
+                      {isSavingCert ? 'حفظ...' : 'حفظ الشهادة'}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    لصق توكن Agora (007...) لاستخراج App ID وفحصه تلقائياً:
+                  </label>
+                  <textarea
+                    rows={2}
+                    dir="ltr"
+                    value={agoraTokenInspectorInput}
+                    onChange={(e) => setAgoraTokenInspectorInput(e.target.value)}
+                    placeholder="007eJxTY..."
+                    className="w-full bg-slate-900 border border-white/12 rounded-xl p-2.5 text-cyan-300 font-mono text-[11px] focus:outline-none focus:border-cyan-400"
+                  />
+                  {parsedAgoraToken && (
+                    <div
+                      className={`mt-2 p-2.5 rounded-xl border text-[11px] space-y-1 ${
+                        parsedAgoraToken.valid
+                          ? 'bg-slate-900/90 border-cyan-400/30 text-slate-200'
+                          : 'bg-rose-950/60 border-rose-400/30 text-rose-200'
+                      }`}
+                    >
+                      {parsedAgoraToken.valid ? (
+                        <>
+                          <div>
+                            <span className="text-slate-400">App ID المستخرج: </span>
+                            <span className="font-mono text-emerald-300 font-bold" dir="ltr">
+                              {parsedAgoraToken.appId}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-slate-400">نوع التوكن: </span>
+                            <span className="font-bold text-amber-300">
+                              {parsedAgoraToken.serviceLabel}
+                            </span>
+                          </div>
+                          {parsedAgoraToken.channelName && (
+                            <div dir="ltr" className="text-slate-300 font-mono">
+                              Channel: {parsedAgoraToken.channelName}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div>{parsedAgoraToken.error || 'تعذر قراءة التوكن'}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    Agora App ID (32-char hex):
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={agoraAppIdInput}
+                    onChange={(e) => setAgoraAppIdInput(e.target.value)}
+                    placeholder="d5c272d82b094c2f86ccc75df0819dfe"
+                    className="w-full min-h-[42px] bg-slate-900 border border-white/12 rounded-xl px-3 text-emerald-300 font-mono focus:outline-none focus:border-emerald-400"
+                  />
+                </div>
+
+                <div className="p-2.5 rounded-xl bg-slate-900/80 border border-white/8 space-y-1.5">
+                  <div className="text-[11px] font-bold text-slate-300">
+                    أسماء قنوات الغرف النشطة:
+                  </div>
+                  <div className="flex flex-wrap gap-1.5" dir="ltr">
+                    {rooms.slice(0, 4).map((r) => {
+                      const ch = formatAgoraChannelName(r.id);
+                      const isCopied = copiedAgoraChannel === ch;
+                      return (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard?.writeText(ch);
+                            setCopiedAgoraChannel(ch);
+                            setTimeout(() => setCopiedAgoraChannel(null), 1800);
+                          }}
+                          className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-white/10 text-[10px] font-mono text-cyan-200 flex items-center gap-1 cursor-pointer"
+                          title={`نسخ قناة غرفة ${r.title}`}
+                        >
+                          {isCopied ? (
+                            <Check className="w-3 h-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3 h-3 text-slate-400" />
+                          )}
+                          <span>{ch}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    RTC Temp Token (اختياري):
+                  </label>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={agoraTokenInput}
+                    onChange={(e) => setAgoraTokenInput(e.target.value)}
+                    placeholder="اختياري في حال عدم ضبط App Certificate بالسيرفر"
+                    className="w-full min-h-[42px] bg-slate-900 border border-white/12 rounded-xl px-3 text-amber-200 font-mono focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="submit"
+                    className="flex-1 min-h-[42px] px-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black cursor-pointer"
+                  >
+                    حفظ وتفعيل حساب Agora
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const reset = updateAgoraConfig({}, true);
+                      setAgoraAppIdInput(reset.appId);
+                      setAgoraTokenInput('');
+                      showAdminNotice('تمت إعادة تعيين إعدادات الصوت للافتراضي (السيرفر الصوتي الخاص).');
+                    }}
+                    className="min-h-[42px] px-3 rounded-xl bg-white/8 hover:bg-white/12 text-slate-300 font-bold cursor-pointer"
+                  >
+                    استعادة الافتراضي
+                  </button>
+                </div>
+              </form>
+              )}
+
+              {/* Right: Live Microphone & Browser Audio Tester */}
+              <div className="p-4 rounded-2xl bg-slate-950/80 border border-white/10 space-y-4 text-xs flex flex-col justify-between">
+                <div className="space-y-3">
+                  <div className="font-black text-sm text-emerald-300">
+                    فحص وتفعيل الميكروفون والصوت في المتصفح
+                  </div>
+                  <p className="text-slate-400 leading-relaxed">
+                    استخدم هذا الفحص للتأكد من منح المتصفح صلاحية الميكروفون وأن الصوت المباشر جاهز قبل دخول الغرف الصوتية.
+                  </p>
+
+                  <div className="p-3 rounded-xl bg-slate-900/90 border border-white/8 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-semibold">مؤشر التقاط الميكروفون المباشر</span>
+                      <span className="font-mono text-emerald-300 font-bold">{micProbeLevel}%</span>
+                    </div>
+                    <div className="w-full h-2.5 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-400 to-cyan-400 transition-all duration-100"
+                        style={{ width: `${micProbeLevel}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {micProbeMsg && (
+                    <div className="p-3 rounded-xl bg-slate-900 border border-white/10 text-slate-200 font-semibold">
+                      {micProbeMsg}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {!isMicProbing ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        sound.unlockAudio();
+                        setIsMicProbing(true);
+                        const res = await agoraVoice.startMicProbe((lvl) => setMicProbeLevel(lvl));
+                        setMicProbeMsg(res.message);
+                        if (!res.ok) {
+                          setIsMicProbing(false);
+                          setMicProbeLevel(0);
+                        }
+                      }}
+                      className="flex-1 min-h-[42px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Mic className="w-4 h-4" />
+                      <span>تشغيل وفحص الميكروفون الآن</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        agoraVoice.stopMicProbe();
+                        setIsMicProbing(false);
+                        setMicProbeLevel(0);
+                        setMicProbeMsg('تم إيقاف فحص الميكروفون.');
+                      }}
+                      className="flex-1 min-h-[42px] px-4 rounded-xl bg-rose-500/20 border border-rose-400/50 text-rose-200 font-black flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <Square className="w-4 h-4" />
+                      <span>إيقاف الفحص</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      sound.unlockAudio();
+                      sound.playWinChime();
+                      agoraVoice.resumeRemoteAudio(true);
+                      setMicProbeMsg('تم تفعيل سماعة المتصفح وتشغيل نغمة الاختبار بنجاح 🔊');
+                    }}
+                    className="min-h-[42px] px-4 rounded-xl bg-white/8 hover:bg-white/12 border border-white/10 text-slate-200 font-bold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Volume2 className="w-4 h-4 text-amber-300" />
+                    <span>تفعيل السماعة</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
 
       {/* EDIT EXISTING GIFT MODAL (Attach Any Media URL + Custom Sound URL + Duration) */}
       {editingGift && (
@@ -2511,7 +3375,7 @@ export const AdminDashboard: React.FC = () => {
 
               <div>
                 <label className="flex items-center justify-between text-slate-300 mb-1 font-semibold">
-                  <span>رابط حركة الهدية (MP4 / WebM / APNG / GIF / WebP):</span>
+                  <span>رابط حركة الهدية (VAP / MP4 شفاف تلقائياً / WebM / APNG / GIF / WebP):</span>
                   {editVideoUrl.trim() && (
                     <span className="font-mono text-[10px] text-rose-300">
                       {editGiftApngInfo
@@ -2525,7 +3389,7 @@ export const AdminDashboard: React.FC = () => {
                   dir="ltr"
                   value={editVideoUrl}
                   onChange={(e) => setEditVideoUrl(e.target.value)}
-                  placeholder="https://example.com/gift-animation.mp4 أو .apng أو .gif"
+                  placeholder="https://example.com/gift-vap.mp4 أو .vap أو .apng أو .gif (شفاف تلقائياً)"
                   className="w-full min-h-[42px] bg-slate-950 border border-white/12 rounded-xl px-3 text-rose-300 font-mono text-left focus:outline-none focus:border-rose-400"
                 />
               </div>

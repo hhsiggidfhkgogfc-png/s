@@ -35,7 +35,7 @@ import {
   Search,
   UserCheck,
 } from 'lucide-react';
-import { RoomSeat, GiftItem, VoiceRoom } from '../types';
+import { RoomSeat, GiftItem, VoiceRoom, RoomLiveEvent, RoomLiveEventGiftSnapshot } from '../types';
 import { InteractiveGamesHub } from './InteractiveGamesHub';
 import { SmartMediaView } from './SmartMediaView';
 import {
@@ -44,7 +44,10 @@ import {
   resolveGiftStageMedia,
 } from '../utils/mediaFormats';
 import { preloadMediaAssets } from '../utils/apngEngine';
-import { agoraVoice } from '../utils/agoraVoice';
+import { inspectVapUrl } from '../utils/vapEngine';
+import { AgoraConnectionStatus, agoraVoice } from '../utils/agoraVoice';
+import { selfHostedVoice } from '../utils/selfHostedVoice';
+import { publishRoomLiveEventToFirestore } from '../utils/auravoiceFirestore';
 import { sound } from '../utils/audio';
 import midnightLoungeBg from '../assets/images/room_bg_midnight_lounge_1795294231147.jpg';
 import royalMajlisBg from '../assets/images/room_bg_royal_majlis_1795294234181.jpg';
@@ -166,7 +169,7 @@ interface RocketTierConfig {
   icon: string;
   targetCoins: number;
   rewardCoins: number;
-  rewardBagGifts: { giftId: string; count: number }[];
+  giftCounts: number[];
   accent: string;
 }
 
@@ -177,11 +180,7 @@ const ROCKET_TIERS: RocketTierConfig[] = [
     icon: '🚀',
     targetCoins: 10000,
     rewardCoins: 5000,
-    rewardBagGifts: [
-      { giftId: 'gift_lollipop_lucky', count: 10 },
-      { giftId: 'gift_rose', count: 15 },
-      { giftId: 'gift_coffee', count: 5 },
-    ],
+    giftCounts: [10, 15, 5],
     accent: 'from-sky-400 to-indigo-500',
   },
   {
@@ -190,11 +189,7 @@ const ROCKET_TIERS: RocketTierConfig[] = [
     icon: '🛸',
     targetCoins: 25000,
     rewardCoins: 15000,
-    rewardBagGifts: [
-      { giftId: 'gift_lollipop_lucky', count: 25 },
-      { giftId: 'gift_pink_perfume', count: 5 },
-      { giftId: 'gift_heart', count: 8 },
-    ],
+    giftCounts: [25, 5, 8],
     accent: 'from-amber-400 to-orange-500',
   },
   {
@@ -203,11 +198,7 @@ const ROCKET_TIERS: RocketTierConfig[] = [
     icon: '☄️',
     targetCoins: 50000,
     rewardCoins: 35000,
-    rewardBagGifts: [
-      { giftId: 'gift_halloween_candy', count: 5 },
-      { giftId: 'gift_car', count: 2 },
-      { giftId: 'gift_teddy', count: 6 },
-    ],
+    giftCounts: [5, 2, 6],
     accent: 'from-violet-400 to-indigo-600',
   },
   {
@@ -216,11 +207,7 @@ const ROCKET_TIERS: RocketTierConfig[] = [
     icon: '🌌',
     targetCoins: 100000,
     rewardCoins: 75000,
-    rewardBagGifts: [
-      { giftId: 'gift_yacht', count: 2 },
-      { giftId: 'gift_helicopter', count: 1 },
-      { giftId: 'gift_treat_or_trick', count: 2 },
-    ],
+    giftCounts: [2, 1, 2],
     accent: 'from-rose-400 to-purple-600',
   },
   {
@@ -229,14 +216,48 @@ const ROCKET_TIERS: RocketTierConfig[] = [
     icon: '👑',
     targetCoins: 250000,
     rewardCoins: 200000,
-    rewardBagGifts: [
-      { giftId: 'gift_dragon', count: 2 },
-      { giftId: 'gift_palace', count: 2 },
-      { giftId: 'gift_scorpion', count: 1 },
-    ],
+    giftCounts: [2, 2, 1],
     accent: 'from-amber-300 to-red-600',
   },
 ];
+
+function resolveRocketBagGifts(
+  tierLevel: number,
+  liveGifts: GiftItem[]
+): { giftId: string; count: number; gift: GiftItem }[] {
+  if (!liveGifts || liveGifts.length === 0) return [];
+  const tier = ROCKET_TIERS.find((t) => t.level === tierLevel) || ROCKET_TIERS[0];
+  const sorted = [...liveGifts].sort((a, b) => a.coinPrice - b.coinPrice);
+  const startIdx = Math.min(Math.max(0, tierLevel - 1), Math.max(0, sorted.length - 1));
+  return tier.giftCounts.map((count, i) => {
+    const gift = sorted[(startIdx + i) % sorted.length];
+    return { giftId: gift.id, count, gift };
+  });
+}
+
+function resolveLuckyBagRewards(
+  tierIndex: number,
+  liveGifts: GiftItem[]
+): { giftId: string; nameAr: string; icon: string; count: number }[] {
+  if (!liveGifts || liveGifts.length === 0) return [];
+  const sorted = [...liveGifts].sort((a, b) => a.coinPrice - b.coinPrice);
+  const luckyFirst = [...sorted.filter((g) => g.isLucky || g.category === 'lucky'), ...sorted];
+  const countsByTier = [
+    [5, 5],
+    [12, 4],
+    [2, 30],
+  ];
+  const counts = countsByTier[tierIndex] || countsByTier[0];
+  return counts.map((count, idx) => {
+    const picked = luckyFirst[(tierIndex + idx) % luckyFirst.length] || sorted[0];
+    return {
+      giftId: picked.id,
+      nameAr: picked.nameAr,
+      icon: picked.icon,
+      count,
+    };
+  });
+}
 
 export const VoiceRoomView: React.FC = () => {
   const {
@@ -249,6 +270,7 @@ export const VoiceRoomView: React.FC = () => {
     toggleSeatLock,
     activeRoomMessages,
     sendRoomMessage,
+    appendRoomMessage,
     sendGift,
     rechargeCoins,
     gifts,
@@ -310,7 +332,19 @@ export const VoiceRoomView: React.FC = () => {
   const [isRoomSoundMuted, setIsRoomSoundMuted] = useState(false);
   const [agoraVolumes, setAgoraVolumes] = useState<Record<string, number>>({});
   const [agoraLiveMicActive, setAgoraLiveMicActive] = useState(false);
+  const [agoraStatus, setAgoraStatus] = useState<AgoraConnectionStatus>({
+    state: 'idle',
+    appId: '',
+    channel: null,
+    remoteUsersCount: 0,
+    autoplayBlocked: false,
+    micActive: false,
+    micError: null,
+    errorMessage: null,
+    requiresToken: false,
+  });
   const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
+  const [dismissedVoiceErrorKey, setDismissedVoiceErrorKey] = useState<string | null>(null);
   const [idCopied, setIdCopied] = useState(false);
   const [chatClearedBeforeTs, setChatClearedBeforeTs] = useState<number>(0);
 
@@ -402,6 +436,9 @@ export const VoiceRoomView: React.FC = () => {
   const lastHandledFlyingIdRef = useRef<string | null>(null);
   const lastPlayedStageSoundKeyRef = useRef<number | null>(null);
   const stagePulseCounterRef = useRef<number>(0);
+  const roomJoinedAtRef = useRef<number>(Date.now());
+  const handledRoomEventIdsRef = useRef<Set<string>>(new Set());
+  const handleIncomingRoomEventRef = useRef<(ev: RoomLiveEvent) => void>(() => {});
 
   // Room Event Logs
   const [roomEventLogs, setRoomEventLogs] = useState<RoomEventLog[]>([]);
@@ -410,7 +447,7 @@ export const VoiceRoomView: React.FC = () => {
   const [giftDrawerTab, setGiftDrawerTab] = useState<
     'all' | 'classic' | 'luxury' | 'lucky' | 'bag'
   >('all');
-  const [selectedGiftId, setSelectedGiftId] = useState<string>('gift_rose');
+  const [selectedGiftId, setSelectedGiftId] = useState<string>(gifts[0]?.id || '');
   const [giftCount, setGiftCount] = useState<number>(1);
   const [selectedRecipientSeats, setSelectedRecipientSeats] = useState<number[]>([]);
 
@@ -498,17 +535,23 @@ export const VoiceRoomView: React.FC = () => {
     });
   }, [flyingGift]);
 
-  // Warm-preload gift & entrance assets (all formats + custom gift audio) when inside a room so gifts play at 0ms
+  // Warm-preload gift & entrance assets (VAP metadata + all formats + custom gift audio) when inside a room so gifts play at 0ms
   useEffect(() => {
     const urls: Array<string | undefined> = [];
     gifts.forEach((g) => {
-      if (g.videoUrl) urls.push(g.videoUrl);
+      if (g.videoUrl) {
+        urls.push(g.videoUrl);
+        void inspectVapUrl(g.videoUrl);
+      }
       if (g.imageUrl) urls.push(g.imageUrl);
       if (g.soundUrl) sound.preloadAudioUrl(g.soundUrl);
     });
     storeItems.forEach((s) => {
       if (s.type === 'entrance') {
-        if (s.videoUrl) urls.push(s.videoUrl);
+        if (s.videoUrl) {
+          urls.push(s.videoUrl);
+          void inspectVapUrl(s.videoUrl);
+        }
         if (s.previewUrl) urls.push(s.previewUrl);
       }
     });
@@ -517,6 +560,9 @@ export const VoiceRoomView: React.FC = () => {
 
   // Prioritize warming currently selected gift media & audio as soon as drawer opens or selection changes
   useEffect(() => {
+    if (gifts.length > 0 && !gifts.some((g) => g.id === selectedGiftId)) {
+      setSelectedGiftId(gifts[0].id);
+    }
     if (activeBottomDrawer !== 'gift') return;
     const selected = gifts.find((g) => g.id === selectedGiftId);
     if (!selected) return;
@@ -624,6 +670,9 @@ export const VoiceRoomView: React.FC = () => {
     const unsubMic = agoraVoice.subscribeMicStatus((active) => {
       setAgoraLiveMicActive(active);
     });
+    const unsubStatus = agoraVoice.subscribeStatus((st) => {
+      setAgoraStatus(st);
+    });
     let noticeTimer: number | null = null;
     const unsubNotice = agoraVoice.subscribeNotices((msg) => {
       setVoiceNotice(msg);
@@ -634,6 +683,7 @@ export const VoiceRoomView: React.FC = () => {
     return () => {
       unsubVol();
       unsubMic();
+      unsubStatus();
       unsubNotice();
       if (noticeTimer) window.clearTimeout(noticeTimer);
     };
@@ -641,11 +691,82 @@ export const VoiceRoomView: React.FC = () => {
 
   useEffect(() => {
     if (!activeRoom?.id || !currentUser.id) return;
-    void agoraVoice.joinRoom(activeRoom.id, currentUser.id);
+    roomJoinedAtRef.current = Date.now();
+    handledRoomEventIdsRef.current.clear();
+    setDismissedVoiceErrorKey(null);
+    void agoraVoice.joinRoom(activeRoom.id, currentUser.id, currentUser.displayName);
     return () => {
       void agoraVoice.leaveRoom();
     };
-  }, [activeRoom?.id, currentUser.id]);
+  }, [activeRoom?.id, currentUser.id, currentUser.displayName]);
+
+  // Subscribe to real-time WebSocket room events (gifts, lucky bags, rockets, emojis, live chat)
+  useEffect(() => {
+    const unsubEvents = selfHostedVoice.subscribeRoomEvents((ev) => {
+      handleIncomingRoomEventRef.current(ev);
+    });
+    return () => {
+      unsubEvents();
+    };
+  }, []);
+
+  // Also consume real-time Firestore room messages carrying liveEvent / remote giftData (works on static hosts too!)
+  useEffect(() => {
+    if (!activeRoom?.id || activeRoomMessages.length === 0) return;
+    const minFreshTs = roomJoinedAtRef.current - 3500;
+    for (const msg of activeRoomMessages) {
+      if (msg.roomId !== activeRoom.id) continue;
+      if (msg.liveEvent && msg.liveEvent.id) {
+        if (msg.liveEvent.createdAt >= minFreshTs) {
+          handleIncomingRoomEventRef.current(msg.liveEvent);
+        }
+        continue;
+      }
+      // Backwards-compatible fallback: legacy giftData messages without liveEvent from remote users
+      if (msg.giftData && msg.senderId !== currentUser.id) {
+        const parsedTs = Number(msg.id.split('_')[1] || 0);
+        if (parsedTs >= minFreshTs) {
+          const catalogGift = gifts.find((g) => g.id === msg.giftData!.giftId);
+          if (catalogGift) {
+            const syntheticEvent: RoomLiveEvent = {
+              id: `legacy_${msg.id}`,
+              kind: 'gift_throw',
+              roomId: activeRoom.id,
+              senderId: msg.senderId,
+              senderName: msg.senderName,
+              senderAvatar: msg.senderAvatar,
+              senderVipLevel: msg.vipLevel,
+              senderLevel: msg.level,
+              createdAt: parsedTs,
+              gift: {
+                id: catalogGift.id,
+                name: catalogGift.name,
+                nameAr: catalogGift.nameAr,
+                category: catalogGift.category,
+                coinPrice: catalogGift.coinPrice,
+                diamondReward: catalogGift.diamondReward,
+                icon: catalogGift.icon,
+                imageUrl: catalogGift.imageUrl,
+                videoUrl: catalogGift.videoUrl,
+                soundUrl: catalogGift.soundUrl,
+                effectDurationSec: catalogGift.effectDurationSec,
+                accentColor: catalogGift.accentColor,
+                animationType: catalogGift.animationType,
+                soundEffect: catalogGift.soundEffect,
+                isLucky: catalogGift.isLucky,
+              },
+              targetSeats: [],
+              targetNames: msg.giftData.targetUserName || 'المتحدثين',
+              count: msg.giftData.giftCount || 1,
+              comboHits: 1,
+              isLucky: Boolean(catalogGift.isLucky || catalogGift.category === 'lucky'),
+            };
+            handleIncomingRoomEventRef.current(syntheticEvent);
+          }
+        }
+      }
+    }
+  }, [activeRoom?.id, activeRoomMessages, currentUser.id, gifts]);
 
   const myLiveRoomSeat = activeRoom?.seats.find((s) => s.userId === currentUser.id);
   const isSeatedInAgora = Boolean(myLiveRoomSeat);
@@ -792,8 +913,11 @@ export const VoiceRoomView: React.FC = () => {
     }
 
     setActiveBottomDrawer('none');
+    const now = Date.now();
+    const bagId = `lbag_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    handledRoomEventIdsRef.current.add(bagId);
     setActiveLuckyBag({
-      id: `lbag_${Date.now()}`,
+      id: bagId,
       tierName,
       senderName: currentUser.displayName,
       totalCoinsPool: rewardPoolCoins,
@@ -801,6 +925,22 @@ export const VoiceRoomView: React.FC = () => {
       timeLeftMs: 10000,
       claimedByMe: false,
     });
+    const bagEvent: RoomLiveEvent = {
+      id: bagId,
+      kind: 'lucky_bag',
+      roomId: activeRoom.id,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipLevel: currentUser.vipLevel,
+      senderLevel: currentUser.level,
+      createdAt: now,
+      tierName,
+      totalCoinsPool: rewardPoolCoins,
+      rewardGifts: giftRewards,
+    };
+    selfHostedVoice.broadcastRoomEvent(bagEvent);
+    void publishRoomLiveEventToFirestore(bagEvent).catch(() => {});
   };
 
   const handleClaimLuckyBag = () => {
@@ -845,18 +985,17 @@ export const VoiceRoomView: React.FC = () => {
   const completeRocketTier = (tierToComplete: RocketTierConfig, carryOverCoins = 0) => {
     rechargeCoins(tierToComplete.rewardCoins, `مكافأة ${tierToComplete.nameAr}`);
 
-    const wonGiftsSummary: { nameAr: string; icon: string; count: number }[] = [];
-    addBagGifts(tierToComplete.rewardBagGifts);
-    tierToComplete.rewardBagGifts.forEach((rg) => {
-      const giftMeta = gifts.find((g) => g.id === rg.giftId);
-      if (giftMeta) {
-        wonGiftsSummary.push({
-          nameAr: giftMeta.nameAr,
-          icon: giftMeta.icon,
-          count: rg.count,
-        });
-      }
-    });
+    const resolvedRewards = resolveRocketBagGifts(tierToComplete.level, gifts);
+    const wonGiftsSummary: { nameAr: string; icon: string; count: number }[] = resolvedRewards.map(
+      (rg) => ({
+        nameAr: rg.gift.nameAr,
+        icon: rg.gift.icon,
+        count: rg.count,
+      })
+    );
+    if (resolvedRewards.length > 0) {
+      addBagGifts(resolvedRewards.map((rg) => ({ giftId: rg.giftId, count: rg.count })));
+    }
 
     setRocketRewardPopup({
       level: tierToComplete.level,
@@ -865,11 +1004,14 @@ export const VoiceRoomView: React.FC = () => {
       giftsWon: wonGiftsSummary,
     });
 
-    const nowTime = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+    const now = Date.now();
+    const rocketEvId = `rocket_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    handledRoomEventIdsRef.current.add(rocketEvId);
+    const nowTime = new Date(now).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
     setRoomEventLogs((prev) => [
       ...prev.slice(-30),
       {
-        id: `log_rocket_${Date.now()}`,
+        id: `log_rocket_${now}`,
         type: 'rocket_explosion',
         senderName: currentUser.displayName,
         vipLevel: currentUser.vipLevel,
@@ -883,6 +1025,23 @@ export const VoiceRoomView: React.FC = () => {
         time: nowTime,
       },
     ]);
+    const rocketEvent: RoomLiveEvent = {
+      id: rocketEvId,
+      kind: 'rocket_explosion',
+      roomId: activeRoom.id,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipLevel: currentUser.vipLevel,
+      senderLevel: currentUser.level,
+      createdAt: now,
+      rocketLevel: tierToComplete.level,
+      rocketNameAr: tierToComplete.nameAr,
+      rocketIcon: tierToComplete.icon,
+      rewardCoins: tierToComplete.rewardCoins,
+    };
+    selfHostedVoice.broadcastRoomEvent(rocketEvent);
+    void publishRoomLiveEventToFirestore(rocketEvent).catch(() => {});
 
     if (tierToComplete.level >= 5) {
       const lockUntil = Date.now() + 24 * 60 * 60 * 1000;
@@ -969,7 +1128,279 @@ export const VoiceRoomView: React.FC = () => {
   };
 
   // =========================================================================
-  // AUTHENTIC GIFT THROW HANDLER (Side Stacked Combo Track + Lucky Engine + MP4)
+  // SHARED GIFT RENDERER (Plays identically for Sender + ALL Users in Room!)
+  // Supports VAP transparent video, MP4/WebM/APNG/GIF/WebP, glide, combo, log
+  // =========================================================================
+  const buildGiftSnapshot = (gift: GiftItem): RoomLiveEventGiftSnapshot => ({
+    id: gift.id,
+    name: gift.name,
+    nameAr: gift.nameAr,
+    category: gift.category,
+    coinPrice: gift.coinPrice,
+    diamondReward: gift.diamondReward,
+    icon: gift.icon,
+    imageUrl: gift.imageUrl,
+    videoUrl: gift.videoUrl,
+    soundUrl: gift.soundUrl,
+    effectDurationSec: gift.effectDurationSec,
+    accentColor: gift.accentColor,
+    animationType: gift.animationType,
+    soundEffect: gift.soundEffect,
+    isLucky: gift.isLucky,
+  });
+
+  const playGiftVisualsAndLog = (params: {
+    gift: GiftItem;
+    senderId: string;
+    senderName: string;
+    senderAvatar: string;
+    senderVipLevel: number;
+    senderLevel: number;
+    targetSeats: number[];
+    targetLabel: string;
+    count: number;
+    comboHits: number;
+    isLucky: boolean;
+    luckyMultiplier?: number;
+    luckyWinCoins?: number;
+    now: number;
+  }) => {
+    const {
+      gift,
+      senderId,
+      senderName,
+      senderAvatar,
+      senderVipLevel,
+      senderLevel,
+      targetSeats,
+      targetLabel,
+      count,
+      comboHits,
+      isLucky,
+      luckyMultiplier,
+      luckyWinCoins,
+      now,
+    } = params;
+
+    // 1. Subtle single gift glide to target mic(s)
+    if (targetSeats.length > 0) {
+      triggerSubtleGiftGlide(gift, targetSeats, count);
+    }
+
+    // 1b. Play full-room transparent stage gift overlay (VAP / MP4 / WebM / APNG / GIF / WebP / PNG)
+    const pulseKey = ++stagePulseCounterRef.current;
+    if (gift.soundUrl) {
+      sound.preloadAudioUrl(gift.soundUrl);
+    }
+    const stageMedia = resolveGiftStageMedia(gift);
+    if (stageMedia.mediaUrl) {
+      const mediaUrl = stageMedia.mediaUrl;
+      setActiveStageGift((prev) => {
+        if (prev && prev.mediaUrl === mediaUrl) {
+          return {
+            ...prev,
+            comboPulseKey: pulseKey,
+            giftName: gift.nameAr,
+            senderName,
+            soundEffect: gift.soundEffect,
+            soundUrl: gift.soundUrl,
+          };
+        }
+        return {
+          id: `stage_${now}_${gift.id}_${pulseKey}`,
+          mediaUrl,
+          fallbackUrl: stageMedia.fallbackUrl,
+          preferVideo: stageMedia.preferVideo,
+          durationMs: stageMedia.durationMs,
+          hasExplicitDuration: stageMedia.hasExplicitDuration,
+          comboPulseKey: pulseKey,
+          giftName: gift.nameAr,
+          senderName,
+          soundEffect: gift.soundEffect,
+          soundUrl: gift.soundUrl,
+        };
+      });
+    } else {
+      sound.playGiftHitAudio(gift.soundEffect, gift.soundUrl, isRoomSoundMuted);
+    }
+
+    // 2. Push/Merge into Side Stacked Gift Combo Track (Max 2 clean banners)
+    const trackKey = `${senderId}_${gift.id}_${targetLabel}`;
+    setGiftComboTrack((prev) => {
+      const existingIdx = prev.findIndex((item) => item.key === trackKey);
+      const updatedItem: GiftComboTrackItem = {
+        id: `${trackKey}_${now}`,
+        key: trackKey,
+        senderName,
+        senderAvatar,
+        targetNames: targetLabel,
+        giftName: gift.nameAr,
+        giftIcon: gift.icon,
+        giftImageUrl: gift.imageUrl,
+        countPerHit: count,
+        comboHits: existingIdx >= 0 ? prev[existingIdx].comboHits + 1 : comboHits,
+        isLucky,
+        luckyMultiplier,
+        luckyWinCoins,
+        updatedAt: now,
+      };
+      if (existingIdx >= 0) {
+        const clone = [...prev];
+        clone[existingIdx] = updatedItem;
+        return clone;
+      }
+      return [...prev.slice(-1), updatedItem];
+    });
+
+    // 3. Only ultra-luxury gifts (>= 50,000 coins) get a sleek top marquee strip
+    if (gift.coinPrice >= 50000) {
+      setLuxuryNotice({
+        id: `lux_${now}`,
+        senderName,
+        targetNames: targetLabel,
+        giftName: gift.nameAr,
+        giftIcon: gift.icon,
+        giftImageUrl: gift.imageUrl,
+        count,
+      });
+      if (luxuryTimeoutRef.current) window.clearTimeout(luxuryTimeoutRef.current);
+      luxuryTimeoutRef.current = window.setTimeout(() => setLuxuryNotice(null), 2800);
+    }
+
+    // 4. Clean Room Chat Log entry
+    const nowTime = new Date(now).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+    setRoomEventLogs((prev) => [
+      ...prev.slice(-30),
+      {
+        id: `log_gift_${now}_${Math.random()}`,
+        type: isLucky && luckyWinCoins ? 'lucky_win' : 'gift_throw',
+        senderName,
+        vipLevel: senderVipLevel,
+        level: senderLevel,
+        targetNames: targetLabel,
+        giftName: gift.nameAr,
+        giftIcon: gift.icon,
+        giftCount: count,
+        comboHits,
+        winCoins: luckyWinCoins,
+        multiplier: luckyMultiplier,
+        time: nowTime,
+      },
+    ]);
+  };
+
+  // Keep latest room event handler in ref so WS & Firestore listeners always see fresh room state
+  handleIncomingRoomEventRef.current = (ev: RoomLiveEvent) => {
+    if (!ev || !ev.id || !activeRoom || ev.roomId !== activeRoom.id) return;
+    if (handledRoomEventIdsRef.current.has(ev.id)) return;
+    handledRoomEventIdsRef.current.add(ev.id);
+    if (handledRoomEventIdsRef.current.size > 400) {
+      const oldest = Array.from(handledRoomEventIdsRef.current).slice(0, 150);
+      oldest.forEach((k) => handledRoomEventIdsRef.current.delete(k));
+    }
+
+    const now = Date.now();
+    if (ev.kind === 'gift_throw' && ev.gift) {
+      const catalogMatch = gifts.find((g) => g.id === ev.gift!.id);
+      const resolvedGift: GiftItem = {
+        id: ev.gift.id,
+        name: ev.gift.name || catalogMatch?.name || ev.gift.nameAr,
+        nameAr: ev.gift.nameAr || catalogMatch?.nameAr || 'هدية',
+        category: ev.gift.category || catalogMatch?.category || 'classic',
+        coinPrice: ev.gift.coinPrice ?? catalogMatch?.coinPrice ?? 0,
+        diamondReward: ev.gift.diamondReward ?? catalogMatch?.diamondReward ?? 0,
+        icon: ev.gift.icon || catalogMatch?.icon || '🎁',
+        imageUrl: ev.gift.imageUrl || catalogMatch?.imageUrl,
+        videoUrl: ev.gift.videoUrl || catalogMatch?.videoUrl,
+        soundUrl: ev.gift.soundUrl || catalogMatch?.soundUrl,
+        effectDurationSec: ev.gift.effectDurationSec ?? catalogMatch?.effectDurationSec,
+        accentColor: ev.gift.accentColor || catalogMatch?.accentColor || 'from-amber-400 to-orange-500',
+        animationType: ev.gift.animationType || catalogMatch?.animationType || 'float_sparkle',
+        soundEffect: ev.gift.soundEffect || catalogMatch?.soundEffect || 'chime',
+        descriptionAr: catalogMatch?.descriptionAr || '',
+        isLucky: ev.gift.isLucky ?? catalogMatch?.isLucky,
+      };
+      const validTargetSeats = (ev.targetSeats || []).filter((idx) => idx >= 0 && idx < 8);
+      const targetLabel =
+        ev.targetNames ||
+        (validTargetSeats.length > 0 ? getTargetNamesLabel(validTargetSeats) : 'المتحدثين');
+      playGiftVisualsAndLog({
+        gift: resolvedGift,
+        senderId: ev.senderId,
+        senderName: ev.senderName || 'مستخدم',
+        senderAvatar: ev.senderAvatar || '',
+        senderVipLevel: ev.senderVipLevel || 0,
+        senderLevel: ev.senderLevel || 1,
+        targetSeats: validTargetSeats,
+        targetLabel,
+        count: Math.max(1, ev.count || 1),
+        comboHits: Math.max(1, ev.comboHits || 1),
+        isLucky: Boolean(ev.isLucky || resolvedGift.isLucky || resolvedGift.category === 'lucky'),
+        luckyMultiplier: ev.luckyMultiplier,
+        luckyWinCoins: ev.luckyWinCoins,
+        now,
+      });
+    } else if (ev.kind === 'lucky_bag' && ev.tierName) {
+      setActiveLuckyBag({
+        id: ev.id,
+        tierName: ev.tierName,
+        senderName: ev.senderName || 'مستخدم',
+        totalCoinsPool: ev.totalCoinsPool || 0,
+        rewardGifts: ev.rewardGifts || [],
+        timeLeftMs: 10000,
+        claimedByMe: false,
+      });
+    } else if (ev.kind === 'rocket_explosion') {
+      const nowTime = new Date(now).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+      setRoomEventLogs((prev) => [
+        ...prev.slice(-30),
+        {
+          id: `log_rocket_${now}_${Math.random()}`,
+          type: 'rocket_explosion',
+          senderName: ev.senderName || 'مستخدم',
+          vipLevel: ev.senderVipLevel || 0,
+          level: ev.senderLevel || 1,
+          targetNames: 'الغرفة',
+          giftName: ev.rocketNameAr || 'صاروخ الغرفة',
+          giftIcon: ev.rocketIcon || '🚀',
+          giftCount: 1,
+          comboHits: ev.rocketLevel || 1,
+          winCoins: ev.rewardCoins || 0,
+          time: nowTime,
+        },
+      ]);
+    } else if (ev.kind === 'seat_emoji' && typeof ev.seatIndex === 'number' && ev.emoji) {
+      const targetIdx = ev.seatIndex;
+      const emojiStr = ev.emoji;
+      setSeatEmojis((prev) => ({ ...prev, [targetIdx]: emojiStr }));
+      setTimeout(() => {
+        setSeatEmojis((prev) => {
+          if (prev[targetIdx] !== emojiStr) return prev;
+          const copy = { ...prev };
+          delete copy[targetIdx];
+          return copy;
+        });
+      }, 3500);
+    } else if (ev.kind === 'chat_message' && ev.text) {
+      appendRoomMessage({
+        id: ev.id,
+        roomId: ev.roomId,
+        senderId: ev.senderId,
+        senderName: ev.senderName || 'مستخدم',
+        senderAvatar: ev.senderAvatar || '',
+        vipLevel: ev.senderVipLevel || 0,
+        level: ev.senderLevel || 1,
+        text: ev.text,
+        isSystem: Boolean(ev.isSystem),
+        timestamp:
+          ev.timestamp ||
+          new Date(ev.createdAt || now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      });
+    }
+  };
+
+  // =========================================================================
+  // AUTHENTIC GIFT THROW HANDLER (Local + Broadcast to ALL Users in Room!)
   // =========================================================================
   const executeGiftThrow = (
     gift: GiftItem,
@@ -984,7 +1415,8 @@ export const VoiceRoomView: React.FC = () => {
     sound.unlockAudio();
     const targetLabel = getTargetNamesLabel(finalTargets);
     const totalNeededCount = count * finalTargets.length;
-    lastLocalGiftThrowTsRef.current = Date.now();
+    const now = Date.now();
+    lastLocalGiftThrowTsRef.current = now;
 
     if (fromBag) {
       const ownedCount = bagGifts[gift.id] || 0;
@@ -993,7 +1425,9 @@ export const VoiceRoomView: React.FC = () => {
       const consumed = consumeBagGift(gift.id, deductCount);
       if (!consumed) return false;
     } else {
-      const sentOk = sendGift(gift.id, count, 'seat', finalTargets[0], finalTargets);
+      const sentOk = sendGift(gift.id, count, 'seat', finalTargets[0], finalTargets, {
+        skipLiveBroadcast: true,
+      });
       if (!sentOk) return false;
     }
 
@@ -1010,49 +1444,7 @@ export const VoiceRoomView: React.FC = () => {
       addSupportToRocket(totalGiftValue);
     }
 
-    // 1. Subtle single gift glide to target mic(s)
-    triggerSubtleGiftGlide(gift, finalTargets, count);
-
-    // 1b. Play full-room stage gift overlay seamlessly (MP4, WebM, GIF, WebP, PNG — any format URL)
-    // and sync sound + visual start via SmartMediaView.onReady (or play immediately for icon-only gifts)
-    const now = Date.now();
-    const pulseKey = ++stagePulseCounterRef.current;
-    if (gift.soundUrl) {
-      sound.preloadAudioUrl(gift.soundUrl);
-    }
-    const stageMedia = resolveGiftStageMedia(gift);
-    if (stageMedia.mediaUrl) {
-      const mediaUrl = stageMedia.mediaUrl;
-      setActiveStageGift((prev) => {
-        if (prev && prev.mediaUrl === mediaUrl) {
-          return {
-            ...prev,
-            comboPulseKey: pulseKey,
-            giftName: gift.nameAr,
-            senderName: currentUser.displayName,
-            soundEffect: gift.soundEffect,
-            soundUrl: gift.soundUrl,
-          };
-        }
-        return {
-          id: `stage_${now}_${gift.id}`,
-          mediaUrl,
-          fallbackUrl: stageMedia.fallbackUrl,
-          preferVideo: stageMedia.preferVideo,
-          durationMs: stageMedia.durationMs,
-          hasExplicitDuration: stageMedia.hasExplicitDuration,
-          comboPulseKey: pulseKey,
-          giftName: gift.nameAr,
-          senderName: currentUser.displayName,
-          soundEffect: gift.soundEffect,
-          soundUrl: gift.soundUrl,
-        };
-      });
-    } else {
-      sound.playGiftHitAudio(gift.soundEffect, gift.soundUrl, isRoomSoundMuted);
-    }
-
-    // 2. Evaluate Lucky Gift Win via Dashboard-controlled probability & 1M+ global jackpot ticker
+    // Evaluate Lucky Gift Win via Dashboard-controlled probability & 1M+ global jackpot ticker
     const isLuckyGift =
       gift.isLucky || gift.category === 'lucky' || gift.animationType === 'lollipop_matrix';
     let luckyMult: number | undefined;
@@ -1073,69 +1465,48 @@ export const VoiceRoomView: React.FC = () => {
       }
     }
 
-    // 3. Push/Merge into Side Stacked Gift Combo Track (Max 2 clean banners)
-    const trackKey = `${currentUser.id}_${gift.id}_${targetLabel}`;
-    setGiftComboTrack((prev) => {
-      const existingIdx = prev.findIndex((item) => item.key === trackKey);
-      const updatedItem: GiftComboTrackItem = {
-        id: `${trackKey}_${now}`,
-        key: trackKey,
-        senderName: currentUser.displayName,
-        senderAvatar: currentUser.avatar,
-        targetNames: targetLabel,
-        giftName: gift.nameAr,
-        giftIcon: gift.icon,
-        giftImageUrl: gift.imageUrl,
-        countPerHit: count,
-        comboHits: existingIdx >= 0 ? prev[existingIdx].comboHits + 1 : comboHits,
-        isLucky: isLuckyGift,
-        luckyMultiplier: luckyMult,
-        luckyWinCoins,
-        updatedAt: now,
-      };
-      if (existingIdx >= 0) {
-        const clone = [...prev];
-        clone[existingIdx] = updatedItem;
-        return clone;
-      }
-      return [...prev.slice(-1), updatedItem];
+    // Play locally immediately & mark event ID so our own broadcast never double-plays
+    const eventId = `gift_${now}_${Math.random().toString(36).slice(2, 7)}`;
+    handledRoomEventIdsRef.current.add(eventId);
+    playGiftVisualsAndLog({
+      gift,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipLevel: currentUser.vipLevel,
+      senderLevel: currentUser.level,
+      targetSeats: finalTargets,
+      targetLabel,
+      count,
+      comboHits,
+      isLucky: isLuckyGift,
+      luckyMultiplier: luckyMult,
+      luckyWinCoins,
+      now,
     });
 
-    // 4. Only ultra-luxury gifts (>= 50,000 coins) get a sleek top marquee strip
-    if (gift.coinPrice >= 50000) {
-      setLuxuryNotice({
-        id: `lux_${now}`,
-        senderName: currentUser.displayName,
-        targetNames: targetLabel,
-        giftName: gift.nameAr,
-        giftIcon: gift.icon,
-        giftImageUrl: gift.imageUrl,
-        count,
-      });
-      if (luxuryTimeoutRef.current) window.clearTimeout(luxuryTimeoutRef.current);
-      luxuryTimeoutRef.current = window.setTimeout(() => setLuxuryNotice(null), 2800);
-    }
-
-    // 5. Clean Room Chat Log entry
-    const nowTime = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
-    setRoomEventLogs((prev) => [
-      ...prev.slice(-30),
-      {
-        id: `log_gift_${now}_${Math.random()}`,
-        type: isLuckyGift && luckyWinCoins ? 'lucky_win' : 'gift_throw',
-        senderName: currentUser.displayName,
-        vipLevel: currentUser.vipLevel,
-        level: currentUser.level,
-        targetNames: targetLabel,
-        giftName: gift.nameAr,
-        giftIcon: gift.icon,
-        giftCount: count,
-        comboHits,
-        winCoins: luckyWinCoins,
-        multiplier: luckyMult,
-        time: nowTime,
-      },
-    ]);
+    // Broadcast to EVERY user in the room over WebSocket + Firestore real-time channel
+    const liveEvent: RoomLiveEvent = {
+      id: eventId,
+      kind: 'gift_throw',
+      roomId: activeRoom.id,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipLevel: currentUser.vipLevel,
+      senderLevel: currentUser.level,
+      createdAt: now,
+      gift: buildGiftSnapshot(gift),
+      targetSeats: finalTargets,
+      targetNames: targetLabel,
+      count,
+      comboHits,
+      isLucky: isLuckyGift,
+      luckyMultiplier: luckyMult,
+      luckyWinCoins,
+    };
+    selfHostedVoice.broadcastRoomEvent(liveEvent);
+    void publishRoomLiveEventToFirestore(liveEvent).catch(() => {});
 
     return true;
   };
@@ -1215,6 +1586,9 @@ export const VoiceRoomView: React.FC = () => {
     const targetIdx = mySeatIndex >= 0 ? mySeatIndex : 0;
     if (mySeatIndex < 0) takeSeat(0);
 
+    const now = Date.now();
+    const emojiEvId = `emoji_${now}_${Math.random().toString(36).slice(2, 6)}`;
+    handledRoomEventIdsRef.current.add(emojiEvId);
     setSeatEmojis((prev) => ({ ...prev, [targetIdx]: emoji }));
     setActiveBottomDrawer('none');
     setTimeout(() => {
@@ -1224,6 +1598,22 @@ export const VoiceRoomView: React.FC = () => {
         return copy;
       });
     }, 3500);
+
+    const emojiEvent: RoomLiveEvent = {
+      id: emojiEvId,
+      kind: 'seat_emoji',
+      roomId: activeRoom.id,
+      senderId: currentUser.id,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipLevel: currentUser.vipLevel,
+      senderLevel: currentUser.level,
+      createdAt: now,
+      seatIndex: targetIdx,
+      emoji,
+    };
+    selfHostedVoice.broadcastRoomEvent(emojiEvent);
+    void publishRoomLiveEventToFirestore(emojiEvent).catch(() => {});
   };
 
   const handleClearHeartValue = (seatIndex: number) => {
@@ -1542,13 +1932,71 @@ export const VoiceRoomView: React.FC = () => {
           </div>
         )}
 
-        {voiceNotice && (
-          <div className="absolute top-[112px] inset-x-4 z-50 pointer-events-none flex justify-center">
-            <div className="px-4 py-2 rounded-2xl bg-rose-950/95 border border-rose-400/50 text-rose-100 text-xs font-bold shadow-2xl backdrop-blur-md">
-              {voiceNotice}
+        {(() => {
+          const rawBannerMsg = voiceNotice || agoraStatus.errorMessage || agoraStatus.micError;
+          const voiceErrorKey = `${agoraStatus.channel || ''}:${agoraStatus.errorMessage || agoraStatus.micError || ''}`;
+          const showErrorBanner =
+            Boolean(voiceNotice) ||
+            ((agoraStatus.state === 'error' || Boolean(agoraStatus.micError)) &&
+              dismissedVoiceErrorKey !== voiceErrorKey &&
+              Boolean(rawBannerMsg));
+
+          if (!agoraStatus.autoplayBlocked && !showErrorBanner) return null;
+
+          return (
+            <div className="absolute top-[112px] inset-x-4 z-50 flex justify-center">
+              {agoraStatus.autoplayBlocked ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    sound.unlockAudio();
+                    setIsRoomSoundMuted(false);
+                    agoraVoice.setRemoteAudioMuted(false);
+                    agoraVoice.resumeRemoteAudio(true);
+                    setVoiceNotice(null);
+                  }}
+                  className="px-4 py-2 rounded-2xl bg-emerald-600/95 hover:bg-emerald-500 border border-emerald-300/60 text-white text-xs font-black shadow-2xl backdrop-blur-md flex items-center gap-2 cursor-pointer"
+                >
+                  <Volume2 className="w-4 h-4 animate-pulse" />
+                  <span>اضغط هنا لتفعيل سماع الصوت المباشر</span>
+                </button>
+              ) : (
+                <div className="px-3 py-2 rounded-2xl bg-rose-950/95 border border-rose-400/50 text-rose-100 text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 max-w-full">
+                  <span className="flex-1 leading-relaxed">{rawBannerMsg}</span>
+                  {(agoraStatus.state === 'error' || agoraStatus.micError) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        sound.unlockAudio();
+                        setVoiceNotice(null);
+                        setDismissedVoiceErrorKey(null);
+                        if (agoraStatus.state === 'error') {
+                          void agoraVoice.reconnectActiveRoom();
+                        } else {
+                          void agoraVoice.retryMicPublish();
+                        }
+                      }}
+                      className="px-2.5 py-1 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-black text-[11px] shrink-0 cursor-pointer"
+                    >
+                      {agoraStatus.state === 'error' ? 'إعادة ربط الصوت' : 'تفعيل المايك'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVoiceNotice(null);
+                      setDismissedVoiceErrorKey(voiceErrorKey);
+                    }}
+                    aria-label="إغلاق التنبيه"
+                    className="w-6 h-6 rounded-lg bg-white/10 hover:bg-white/20 text-rose-200 flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* ================================================================= */}
         {/* 1. TOP ROOM HEADER BAR (Clean Flagship Voice Room Architecture)   */}
@@ -1691,22 +2139,83 @@ export const VoiceRoomView: React.FC = () => {
               </button>
             </div>
 
-            {/* Compact Rocket Progress Chip (No clutter, 24h lock preserved) */}
-            <button
-              onClick={() => {
-                setPreviewRocketLevel(rocketLevel);
-                setActiveBottomDrawer('rocket');
-              }}
-              className="h-7 px-2.5 rounded-lg bg-black/35 backdrop-blur-sm border border-white/10 flex items-center gap-1.5 text-slate-200 hover:border-amber-400/40 transition-colors shrink-0"
-              title="صاروخ الغرفة"
-            >
-              <Rocket className="w-3.5 h-3.5 text-amber-400" />
-              <span className="font-mono tabular-nums font-semibold">
-                {isRocketLocked24h
-                  ? formatCooldownHMS(rocketCooldownRemainingMs)
-                  : `Lv.${rocketLevel} · ${rocketProgressPercent}%`}
-              </span>
-            </button>
+            {/* Compact Voice Live + Rocket Progress Chip */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {(agoraStatus.state === 'connected' ||
+                agoraStatus.state === 'connecting' ||
+                agoraLiveMicActive ||
+                agoraStatus.requiresToken) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    sound.unlockAudio();
+                    agoraVoice.primeFromUserGesture();
+                    agoraVoice.resumeRemoteAudio(true);
+                    if (agoraStatus.state === 'error') {
+                      setDismissedVoiceErrorKey(null);
+                      void agoraVoice.reconnectActiveRoom();
+                    }
+                  }}
+                  title={
+                    agoraStatus.provider === 'self_hosted'
+                      ? `السيرفر الصوتي الخاص (${agoraStatus.channel || activeRoom.id})`
+                      : `قناة Agora (${agoraStatus.channel || agoraStatus.appId})`
+                  }
+                  className={`h-7 px-2 rounded-lg border flex items-center gap-1 text-[10px] font-bold transition-colors ${
+                    agoraStatus.state === 'connecting'
+                      ? 'bg-amber-500/15 border-amber-400/40 text-amber-200'
+                      : agoraLiveMicActive
+                      ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                      : agoraStatus.requiresToken
+                      ? 'bg-amber-500/15 border-amber-400/40 text-amber-200'
+                      : 'bg-black/35 border-emerald-500/30 text-emerald-300/90'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      agoraStatus.state === 'connecting'
+                        ? 'bg-amber-400 animate-pulse'
+                        : agoraLiveMicActive
+                        ? 'bg-emerald-400 animate-ping'
+                        : agoraStatus.requiresToken
+                        ? 'bg-amber-400'
+                        : 'bg-emerald-400'
+                    }`}
+                  />
+                  <span>
+                    {agoraStatus.state === 'connecting'
+                      ? 'جاري ربط الصوت'
+                      : agoraLiveMicActive
+                      ? agoraStatus.state === 'connected'
+                        ? agoraStatus.remoteUsersCount > 0
+                          ? `مايك مباشر · ${agoraStatus.remoteUsersCount}`
+                          : 'مايك مباشر'
+                        : 'مايك محلي'
+                      : agoraStatus.requiresToken
+                      ? 'يلزم Token'
+                      : agoraStatus.remoteUsersCount > 0
+                      ? `صوت متصل · ${agoraStatus.remoteUsersCount}`
+                      : 'صوت متصل'}
+                  </span>
+                </button>
+              )}
+
+              <button
+                onClick={() => {
+                  setPreviewRocketLevel(rocketLevel);
+                  setActiveBottomDrawer('rocket');
+                }}
+                className="h-7 px-2.5 rounded-lg bg-black/35 backdrop-blur-sm border border-white/10 flex items-center gap-1.5 text-slate-200 hover:border-amber-400/40 transition-colors shrink-0"
+                title="صاروخ الغرفة"
+              >
+                <Rocket className="w-3.5 h-3.5 text-amber-400" />
+                <span className="font-mono tabular-nums font-semibold">
+                  {isRocketLocked24h
+                    ? formatCooldownHMS(rocketCooldownRemainingMs)
+                    : `Lv.${rocketLevel} · ${rocketProgressPercent}%`}
+                </span>
+              </button>
+            </div>
           </div>
         </header>
 
@@ -1729,9 +2238,9 @@ export const VoiceRoomView: React.FC = () => {
                 isOccupied &&
                 !seat.isMuted &&
                 (seat.userId === currentUser.id && agoraLiveMicActive
-                  ? (liveAgoraLevel ?? 0) > 4
+                  ? (liveAgoraLevel ?? 0) > 2
                   : liveAgoraLevel !== undefined
-                  ? liveAgoraLevel > 4
+                  ? liveAgoraLevel > 2
                   : seat.isSpeaking);
               const seatUserProfile = seat.userId
                 ? users.find((u) => u.id === seat.userId)
@@ -1798,7 +2307,7 @@ export const VoiceRoomView: React.FC = () => {
                         /* Occupied Seat WITH Uploaded Frame: Concentrically centered avatar inside balanced frame */
                         <>
                           <div
-                            className={`relative z-10 w-[46px] h-[46px] rounded-full overflow-hidden transition-transform duration-150 group-active:scale-95 ${
+                            className={`relative z-10 w-[44px] h-[44px] rounded-full overflow-hidden flex items-center justify-center transition-transform duration-150 group-active:scale-95 ${
                               isSpeaking ? 'ring-2 ring-amber-400/70' : ''
                             }`}
                           >
@@ -1820,7 +2329,7 @@ export const VoiceRoomView: React.FC = () => {
                             src={seatFrame!.previewUrl}
                             alt={seatFrame!.nameAr}
                             referrerPolicy="no-referrer"
-                            className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[82px] h-[82px] object-contain z-20 drop-shadow-[0_6px_14px_rgba(0,0,0,0.45)]"
+                            className="pointer-events-none select-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[84px] h-[84px] object-contain z-20 drop-shadow-[0_6px_14px_rgba(0,0,0,0.45)]"
                           />
                         </>
                       ) : (
@@ -2230,6 +2739,9 @@ export const VoiceRoomView: React.FC = () => {
                 {/* Mic Toggle / Climb Mic */}
                 <button
                   onClick={() => {
+                    sound.unlockAudio();
+                    agoraVoice.primeFromUserGesture();
+                    agoraVoice.resumeRemoteAudio(true);
                     if (!mySeat) {
                       const firstOpen = seats8.find((s) => !s.userId && !s.isLocked);
                       if (firstOpen) takeSeat(firstOpen.index);
@@ -2441,11 +2953,13 @@ export const VoiceRoomView: React.FC = () => {
               </div>
 
               {/* 3. Crisp 4-Column Gift Grid */}
-              {giftDrawerTab === 'bag' && filteredDrawerGifts.length === 0 ? (
+              {filteredDrawerGifts.length === 0 ? (
                 <div className="py-10 text-center space-y-2.5">
-                  <div className="text-3xl opacity-80">🎒</div>
+                  <div className="text-3xl opacity-80">{giftDrawerTab === 'bag' ? '🎒' : '🎁'}</div>
                   <p className="text-xs text-slate-400">
-                    الحقيبة فارغة حالياً — يمكنك الحصول على هدايا مجانية من صاروخ الغرفة أو كيس الحظ.
+                    {giftDrawerTab === 'bag'
+                      ? 'الحقيبة فارغة حالياً — يمكنك الحصول على هدايا مجانية من صاروخ الغرفة أو كيس الحظ.'
+                      : 'لا توجد هدايا مرفوعة في هذا التصنيف حالياً.'}
                   </p>
                 </div>
               ) : (
@@ -3222,6 +3736,9 @@ export const VoiceRoomView: React.FC = () => {
                         setViewingProfileUser(targetUser || currentUser);
                         setActiveModal('profile');
                       } else {
+                        sound.unlockAudio();
+                        agoraVoice.primeFromUserGesture();
+                        agoraVoice.resumeRemoteAudio(true);
                         takeSeat(liveSeat.index);
                       }
                       setActiveBottomDrawer('none');
@@ -3488,20 +4005,17 @@ export const VoiceRoomView: React.FC = () => {
                     +{previewRocketTier.rewardCoins.toLocaleString()}
                   </span>
                 </div>
-                {previewRocketTier.rewardBagGifts.map((rg, idx) => {
-                  const gMeta = gifts.find((g) => g.id === rg.giftId);
-                  return (
-                    <div
-                      key={idx}
-                      className="p-2 rounded-xl bg-white/[0.04] border border-white/8 flex flex-col items-center"
-                    >
-                      <span className="text-xl">{gMeta?.icon || '🎁'}</span>
-                      <span className="text-[10px] font-mono tabular-nums text-emerald-400 mt-1">
-                        ×{rg.count}
-                      </span>
-                    </div>
-                  );
-                })}
+                {resolveRocketBagGifts(previewRocketTier.level, gifts).map((rg, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2 rounded-xl bg-white/[0.04] border border-white/8 flex flex-col items-center"
+                  >
+                    <span className="text-xl">{rg.gift.icon || '🎁'}</span>
+                    <span className="text-[10px] font-mono tabular-nums text-emerald-400 mt-1">
+                      ×{rg.count}
+                    </span>
+                  </div>
+                ))}
               </div>
 
               <button
@@ -3543,28 +4057,19 @@ export const VoiceRoomView: React.FC = () => {
                     tierName: 'كيس الحظ السريع',
                     cost: 0,
                     poolCoins: 1500,
-                    gifts: [
-                      { giftId: 'gift_lollipop_lucky', nameAr: 'مصاصة الحظ', icon: '🍭', count: 5 },
-                      { giftId: 'gift_rose', nameAr: 'وردة جوري', icon: '🌹', count: 5 },
-                    ],
+                    gifts: resolveLuckyBagRewards(0, gifts),
                   },
                   {
                     tierName: 'كيس الحظ الذهبي',
                     cost: 2000,
                     poolCoins: 3500,
-                    gifts: [
-                      { giftId: 'gift_lollipop_lucky', nameAr: 'مصاصة الحظ', icon: '🍭', count: 12 },
-                      { giftId: 'gift_pink_perfume', nameAr: 'عطر فرنسي', icon: '🧴', count: 4 },
-                    ],
+                    gifts: resolveLuckyBagRewards(1, gifts),
                   },
                   {
                     tierName: 'كيس الحظ الملكي',
                     cost: 10000,
                     poolCoins: 18000,
-                    gifts: [
-                      { giftId: 'gift_car', nameAr: 'سيارة فيراري', icon: '🏎️', count: 2 },
-                      { giftId: 'gift_lollipop_lucky', nameAr: 'مصاصة الحظ', icon: '🍭', count: 30 },
-                    ],
+                    gifts: resolveLuckyBagRewards(2, gifts),
                   },
                 ].map((bag, i) => (
                   <div
